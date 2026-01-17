@@ -1,0 +1,369 @@
+---
+title: "Processing & Quality control"
+author: "Siyuan Luo"
+date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
+format:
+  html:
+    theme: sandstone
+    embed-resources: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+# Load
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+proj_dir <- "/home/siluo/public/SiyuanLuo/projects/fasting_clinics/"
+setwd(proj_dir)
+```
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+library(readxl)
+library(meffil)
+options(mc.cores=16)
+```
+
+# QC and Processing
+The procedures include:
+
+* Meffil's sample QC 
+* Probe QC & filtering: Sesame (important: pOOBAH filtering) + Meffil's number of beads filtering 
+* Normalization: Sesame's Noob -> save as beta values 
+
+## Sample level QC with Meffil
+
+```{r}
+packageVersion("meffil")
+```
+
+
+Create samplesheet with required columns:
+```{r}
+samplesheet <- read_excel("IDATs_sorted_Genesis/14.12.2022_sample_sheet_R&D_Buchinger_ALL.xlsx", sheet = 1)
+samplesheet$Sex <-substr(samplesheet$Gender, 1, 1)
+samplesheet$Basename <- paste0("IDATs_sorted_Genesis/", samplesheet$SentrixBarcode_A, "/", samplesheet$Basename)
+head(samplesheet)
+```
+
+```{r}
+qc.objects <- meffil.qc(samplesheet, 
+                        chip = "epic",
+                        featureset= "epic",
+                        cell.type.reference="blood idoloptimized epic", 
+                        verbose=TRUE)
+save(qc.objects, file="meffil/qc.objects.Robj")
+```
+
+### Generate Meffil QC report
+
+```{r, warning=FALSE}
+  qc.parameters <- meffil.qc.parameters(
+	beadnum.samples.threshold             = 0.1,
+	detectionp.samples.threshold          = 0.1,
+	detectionp.cpgs.threshold             = 0.1, 
+	beadnum.cpgs.threshold                = 0.1,
+	sex.outlier.sd                        = 5,
+	snp.concordance.threshold             = 0.95
+)
+
+qc.summary <- meffil.qc.summary(
+	qc.objects,
+	parameters = qc.parameters
+)
+
+
+saveRDS(qc.summary, file="meffil/qcsummary.RDS")
+meffil.qc.report(qc.summary, output.file="meffil/qc-report.html")
+```
+
+```{r}
+qc.summary$bad.samples
+```
+
+### Sex mismatches
+The difference of total median intensity for Y chromosome probes and X chromosome probes are shown. This will give two distinct clusters of intensities. Females will be clustered on the left and males on the right. Cutoff for sex detection was XY diff = -2. Mismatched samples are shown in red. The dashed lines represent 5 SD from the mean xy difference. Samples that fall in this interval are denoted as outliers.
+
+```{r, fig.width=8, fig.height=5}
+qc.summary$sex.summary$graph
+```
+
+```{r}
+sum(qc.objects$predicted.sex != qc.objects$sex)
+```
+
+There are 0 sex detection outliers, and 0 sex detection mismatches.
+
+### Methylated/unmethylated ratio
+According to Meffil's documentation, the ratio between the median methylation intensity and the median unmethylation intensity can be used for sample-wise quality control. Outliers are samples whose predicted median methylated signal is more than 3 standard deviations from the expected (regression line).
+
+
+```{r}
+qc.summary$meth.unmeth.summary$graph
+```
+
+```{r}
+qc.summary$meth.unmeth.summary$tab[qc.summary$meth.unmeth.summary$tab$outliers == TRUE,]
+```
+
+WARNING: There are 1 outliers from the meth vs unmeth comparison. 
+
+### Control probes
+The 450k/EPIC array contains control probe which can be used to evaluate the quality of specific sample processing steps (staining, extension,target removal, hybridization, bisulfate conversion etc.). Control probes are grouped in 42 categories of control type. For each category a plot has been generated which shows the control means for each sample. Outliers are >5 SD from the mean. The most important control probes are the bisulfate1 and bisulfate2 control probes. See Page 222 in this [doc](https://support.illumina.com/content/dam/illumina-support/documents/documentation/chemistry_documentation/infinium_assays/infinium_hd_methylation/infinium-hd-methylation-guide-15019519-01.pdf). 
+
+The distribution of sample control means:
+
+```{r, fig.width=8, fig.height=12}
+qc.summary$controlmeans.summary$graph
+```
+
+There were 0 outliers detected based on deviations from mean values for control probes.
+
+NOTE: There seems to be a consistent/repetitive intensity trend along sample IDs. Might be some batch effects.
+
+### Sample detection p-values
+For each sample, the proportion of probes that didn’t pass the detection p-value (0.01) has been calculated.
+
+```{r, fig.width=5, fig.height=3}
+qc.summary$sample.detectionp.summary$graph
+```
+
+WARNING: Although all samples are well below the threshold, there is one outlier:
+
+```{r, fig.width=5, fig.height=3}
+hist(qc.summary$sample.detectionp.summary$tab$prop.badprobes,
+     main="Histogram of bad probe (detection p-value > 0.01) proportion",
+     xlab ="Bad probe proportion")
+```
+
+```{r}
+qc.summary$sample.detectionp.summary$tab[qc.summary$sample.detectionp.summary$tab$prop.badprobes>0.006,]
+```
+
+It is the same bad sample as before: `4033964733`.
+
+### Sample bead numbers
+The proportion of probes with low bead number ( < 3) for each sample:
+```{r, fig.width=5, fig.height=3}
+qc.summary$sample.beadnum.summary$graph
+```
+
+```{r, fig.width=5, fig.height=3}
+hist(qc.summary$sample.beadnum.summary$tab$prop.badprobes,
+     main="Histogram of bad probe (bead number < 3) proportion",
+     xlab ="Bad probe proportion")
+```
+
+```{r}
+qc.summary$sample.beadnum.summary$tab[qc.summary$sample.beadnum.summary$tab$prop.badprobes>0.003,]
+```
+
+WARNING: potential outliers.
+
+## Probe level QC with Meffil
+
+### Detection p-values
+The proportion of samples that didn’t pass the detection p-value threshold (0.01) for each probes:
+```{r, fig.width=12, fig.height=6}
+qc.summary$cpg.detectionp.summary$graph
+```
+
+WARNING: There were 1472 probes with only background signal in a high proportion of samples (proportion of samples with detection p-value > 0.01 is > 0.1).
+
+```{r}
+bad_probes <- qc.summary$cpg.detectionp.summary$tab$name[qc.summary$cpg.detectionp.summary$tab$outliers == TRUE]
+```
+
+### Bead numbers
+
+The proportion of samples that didn’t pass the bead number threshold (0.01) for each probes:
+```{r, fig.width=12, fig.height=6}
+qc.summary$cpg.beadnum.summary$graph
+```
+
+WARNING:  There were 944 CpGs with low bead numbers in a high proportion of samples (proportion of samples with bead number < 3 is > 0.1).
+
+```{r}
+bad_probes <- unique(c(bad_probes, qc.summary$cpg.beadnum.summary$tab$name[qc.summary$cpg.beadnum.summary$tab$outliers == TRUE]))
+saveRDS(bad_probes, file="meffil/meffil_bad_probes.RDS")
+```
+
+## Sesame 
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+library(GenomicRanges)
+library(sesame)
+library(readr)
+library(BiocParallel)
+sesameDataCache()
+```
+
+### Load all data
+```{r}
+files <- searchIDATprefixes("IDATs_sorted_Genesis")
+sdfs <- bplapply(files, readIDATpair, platform="EPIC", BPPARAM = BiocParallel::MulticoreParam(1))
+```
+
+
+### Probe QC and masking
+
+Perform recommended masking
+```{r}
+recommendedMaskNames()$EPIC
+```
+
+Mask bad probes identified with Meffil
+```{r}
+meffil_badprobes <- readRDS("meffil/meffil_bad_probes.RDS")
+sdfs_complete <- bplapply(sdfs, function(pfx){addMask(pfx, meffil_badprobes)}) # datasets without using masking in SESAME
+
+sdfs <- bplapply(sdfs_complete, qualityMask, mask_names = "recommended", BPPARAM = BiocParallel::MulticoreParam(8))
+
+```
+
+### Infer channel for Infinium-I probes
+
+```{r}
+sdfs <- bplapply(sdfs, function(pfx){inferInfiniumIChannel(pfx, verbose = TRUE)}, BPPARAM = BiocParallel::MulticoreParam(8))
+sdfs_complete <- bplapply(sdfs_complete, function(pfx){inferInfiniumIChannel(pfx, verbose = TRUE)}, BPPARAM = BiocParallel::MulticoreParam(8))
+# equivalently
+# sdfs = openSesame(sdfs, prep="C", func=NULL)
+```
+
+### Dye bias correction (non-linear)
+
+```{r}
+sdfs <- bplapply(sdfs, function(pfx){dyeBiasNL(pfx, verbose = TRUE)}, BPPARAM = BiocParallel::MulticoreParam(8))
+sdfs_complete <- bplapply(sdfs_complete, function(pfx){dyeBiasNL(pfx, verbose = TRUE)}, BPPARAM = BiocParallel::MulticoreParam(8))
+# equivalently
+# sdfs = openSesame(sdfs, prep="D", func=NULL)
+```
+
+
+### Detection p-value masking
+
+```{r}
+# pOOBAH
+sdfs <- bplapply(sdfs, function(pfx){pOOBAH(pfx)}, BPPARAM = BiocParallel::MulticoreParam(8))
+sdfs_complete <- bplapply(sdfs_complete, function(pfx){pOOBAH(pfx)}, BPPARAM = BiocParallel::MulticoreParam(8))
+```
+
+### Background subtraction
+
+```{r, fig.show="hold"}
+# noob()
+sdfs <- bplapply(sdfs, function(pfx){noob(pfx)}, BPPARAM = BiocParallel::MulticoreParam(1))
+sdfs_complete <- bplapply(sdfs_complete, function(pfx){noob(pfx)}, BPPARAM = BiocParallel::MulticoreParam(1))
+```
+
+### QC metrics
+
+```{r}
+qcs <- lapply(sdfs, function(x){sesameQC_calcStats(x)})
+df_qc <- do.call(rbind, lapply(qcs, as.data.frame))
+saveRDS(qcs, file=paste0(proj_dir, "sdfs_QC.RDS"))
+write.table(df_qc, quote=FALSE, sep='\t', file=paste0(proj_dir, "sdfs_QC.tsv"))
+
+# save to excel for reading
+df_qc$ID <- rownames(df_qc)
+df_qc <- df_qc[, c("ID", setdiff(names(df_qc), "ID"))]
+
+library(openxlsx)
+write.xlsx(df_qc, file = paste0(proj_dir, "sdfs_QC.xlsx"), sheetName = "QC")
+```
+
+```{r}
+# sesameQC_rankStats(qc, platform="EPIC")
+```
+
+```{r, fig.width=12, fig.height=6}
+sesameQC_plotBar(lapply(sdfs, sesameQC_calcStats, "detection"))
+```
+
+```{r, eval=FALSE, include=FALSE, echo=FALSE}
+# see the influence of signal intensity on beta value
+# lapply(sdf, function(pfx){sesameQC_plotIntensVsBetas(pfx)})
+sesameQC_plotIntensVsBetas(sdfs$"206513960033_R06C01")
+```
+
+
+```{r}
+saveRDS(sdfs, file=paste0(proj_dir, "sdfs_obj_preprocessed.RDS"))
+saveRDS(sdfs_complete, file=paste0(proj_dir, "sdfs_complete_obj_preprocessed.RDS"))
+```
+
+
+### Turn into beta value
+
+```{r}
+betas <- do.call(cbind, bplapply(sdfs, getBetas, collapseToPfx = TRUE, BPPARAM = BiocParallel::MulticoreParam(8)))
+betas_complete <- do.call(cbind, bplapply(sdfs_complete, getBetas, collapseToPfx = TRUE, BPPARAM = BiocParallel::MulticoreParam(8)))
+saveRDS(betas, file=paste0(proj_dir, "betas.RDS"))
+saveRDS(betas_complete, file=paste0(proj_dir, "betas_complete.RDS"))
+```
+
+
+See if the beta distribution is consistent across all samples:
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(tidyr)
+library(RColorBrewer)
+library(scales)
+library(dplyr)
+```
+
+```{r}
+my_col <- c(brewer.pal(8, "Set1"), brewer.pal(8, "Set3"))
+
+# Create a list to store density estimates for each sample
+density_data <- lapply(colnames(betas), function(sample) {
+  dens <- density(betas[, sample], na.rm = TRUE)
+  data.frame(Sample = sample, x = dens$x, y = dens$y)
+})
+density_df <- bind_rows(density_data)
+```
+
+```{r}
+samplesheet <- read_excel("IDATs_sorted_Genesis/14.12.2022_sample_sheet_R&D_Buchinger_ALL.xlsx", sheet=1)
+```
+
+```{r}
+samplesheet$Sample <- samplesheet$Basename
+samplesheet[] <- lapply(samplesheet, as.factor)
+density_df <- density_df %>%
+  left_join(samplesheet[,c("Sample","Sample_Plate", "ID Patient", "AMP_Plate", "SentrixBarcode_A", "SentrixPosition_A", "Date_Scan", "Gender", "Timepoint")], by = "Sample")
+```
+
+```{r}
+meta <- "Date_Scan"
+ggplot(density_df, aes_string(x = "x", y = "y", 
+                       color = meta, fill = meta, 
+                       group = "Sample")) +
+  geom_line() +
+  labs(title = "Compare Beta-values across samples", x = "Value", y = "Density") +
+  theme_minimal()
+# + scale_color_manual(values = my_col)
+```
+
+```{r, include=FALSE}
+# df <- data.frame(betas)
+# long_df <- pivot_longer(df, cols = everything(), names_to = "Sample", values_to = "Value")
+# long_df$Sample <- sub("X","",long_df$Sample)
+# long_df$Sample <- factor(long_df$Sample)
+# long_df <- long_df %>%
+#   left_join(samplesheet[,c("Sample","Sample_Plate", "ID Patient", "AMP_Plate", "SentrixBarcode_A", "SentrixPosition_A", "Date_Scan", "Gender", "Timepoint")], by = "Sample")
+# 
+# ggplot(long_df, aes(x = Sample, y=Value, color = Date_Scan)) +
+#   geom_violin() +
+#   labs(title = "Compare Beta-value distributions", x = "Sample", y = "Beta") +
+#   theme_minimal() + scale_color_manual(values = my_col)
+```
+
+
+# Session information
+
+```{r}
+sessionInfo()
+```
+

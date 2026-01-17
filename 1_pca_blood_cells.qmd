@@ -1,0 +1,144 @@
+---
+title: "PCA of blood cell parameters"
+format:
+  html:
+    theme: sandstone
+    embed-resources: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      class.output="bg-light")
+```
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(PCAtools)
+  library(cowplot)
+})
+
+source("utils.R")
+
+IN_META_3TP   <- "data/meta_3timepoints.csv"
+IN_META_DAILY <- "data/meta_daily.csv"
+
+OUTDIR_FIG <- "=figures"
+dir.create(OUTDIR_FIG, recursive = TRUE, showWarnings = FALSE)
+
+TP_KEEP <- c("D-1", "D+3", "D+10", "M+1")
+CELL_REGEX <- "cytes|_abs|ZYTEN|hemoglobin|MCH|MCV|neutrophile|baso|eosinophile|globinge|hematocrit"
+```
+
+```{r}
+# load data
+daily_meta <- read.csv(IN_META_DAILY, stringsAsFactors = FALSE)
+daily_meta$ID <- as.factor(daily_meta$ID)
+cell_source <- daily_meta %>% filter(Timepoint %in% TP_KEEP)
+
+col_cell <- cell_source %>%
+  select(matches(CELL_REGEX)) %>%
+  colnames()
+
+col_cell
+```
+
+```{r}
+# Select blood-cell parameters
+cell_data <- cell_source %>%
+  select(ID, Timepoint, all_of(col_cell)) %>%
+  filter(!if_all(all_of(col_cell), ~ is.na(.)))  # keep rows with >=1 non-NA
+```
+
+```{r}
+# Drop features with ANY missing values 
+keep_features <- colnames(cell_data)[-(1:2)][colSums(is.na(cell_data[, -(1:2)])) == 0]
+cell_data <- cell_data %>% select(ID, Timepoint, all_of(keep_features))
+```
+
+```{r}
+# Run PCA
+cell_data <- cell_data %>%
+  mutate(sample_id = paste0("ID", ID, "_", Timepoint)) %>%
+  arrange(ID, Timepoint)
+
+metadata <- cell_data %>% select(sample_id, ID, Timepoint)
+rownames(metadata) <- metadata$sample_id
+# Ensure unique sample IDs
+stopifnot(!anyDuplicated(metadata$sample_id))
+
+# feature matrix (samples x features) -> transpose to (features x samples)
+X <- cell_data %>%
+  select(-ID, -Timepoint, -sample_id) %>%
+  as.matrix()
+
+mat <- t(X)
+colnames(mat) <- metadata$sample_id
+
+# Run PCA
+p <- pca(mat, metadata = metadata, removeVar = 0)
+saveRDS(p, file = "data/pca_blood_cells.rds")
+```
+
+```{r}
+p_scree <- myscreeplot(p, components = 1:3)
+p_scree
+```
+
+```{r}
+p_scores <- biplot(
+  p,
+  x = "PC1", y = "PC2",
+  showLoadings = TRUE,
+  colby = "Timepoint",
+  lab = NULL,
+  legendPosition = "right",
+  xlim = NULL, ylim=NULL
+) 
+p_scores
+```
+
+```{r}
+loadings <- p$loadings[,1:2]
+loadings$Factors <- rownames(loadings)
+df_loadings <- reshape2::melt(loadings, id.vars = "Factors", variable.name = "PC", value.name = "Loadings")
+
+p_loading <- ggplot(df_loadings, aes(x = Loadings, y = Factors, color = Loadings)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 0.8) +  # Vertical line at x=0
+  geom_point(size = 4) +
+  scale_color_gradientn(colors = c("red", "blue", "red"), values = c(0, 0.5, 1), limits=c(-1,1)) +  # Symmetric color scale
+  facet_grid(. ~ PC, scales = "free") +
+  theme_bw(base_size = 14) +
+  xlim(-1,1) +
+  theme(axis.text.y = element_text(face = "bold"),
+        strip.text = element_text(size = 14, face = "bold"),
+        legend.position = "right") +
+  labs(x = "PCA Loadings", y = "Factors", color = "Loadings", title="")
+```
+
+```{r}
+grDevices::cairo_pdf("figures/suppl_pca_blood_cell.pdf", width=10, height=5)
+plot_grid(p_scree + labs(title=""), 
+          p_scores, 
+          labels=c("a", "b"), label_size=20, ncol=2, rel_widths=c(1,1.5), align="h", axis="tb")
+dev.off()
+```
+
+```{r}
+grDevices::cairo_pdf("figures/suppl_pca_blood_cell_2.pdf", width=10, height=5)
+plot_grid(p_scree + labs(title=""), 
+          p_loading, 
+          labels=c("a", "b"), label_size=20, ncol=2, rel_widths=c(1,1.5), align="h", axis="tb")
+dev.off()
+```
+
+```{r}
+sessionInfo()
+```
+

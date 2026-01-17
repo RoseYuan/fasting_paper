@@ -1,0 +1,403 @@
+---
+title: "Visualization of PCA on blood parameters"
+format:
+  html:
+    theme: sandstone
+    embed-resources: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      class.output="bg-light")
+```
+
+# Load 
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(tidyr)
+library(cowplot)
+library(dplyr)
+library(readxl)
+library(ggpubr)
+library(knitr)
+library(gridExtra)
+library(enrichplot)
+library(patchwork)
+source("utils.R")
+```
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+meta <- read.csv(file="data/meta_3timepoints.csv")
+meta <- meta %>% 
+  filter(ID != 18) %>%
+  mutate(
+    ID = factor(ID),
+    Timepoint = factor(Timepoint),
+    Date_Scan_recode = factor(as.numeric(factor(Date_Scan))),
+    sex = factor(sex)
+  )
+rownames(meta) <- meta$Sample
+```
+
+```{r config}
+# ============================================================================ #
+# Configuration: Parameter groupings for PCA analysis
+# ============================================================================ #
+energy_vars <- meta %>% 
+  select(matches("glucose|insulin|Homa|glykohemoglobin|glyceride|cholester|hdl|ldl|Ketosemia")) %>% 
+  colnames()
+
+liver_vars <- meta %>% 
+  select(matches("bilirubin|alk|ggt|got|gpt")) %>% 
+  colnames()
+
+blood_vars <- c(
+  meta %>% select(matches("cytes|_abs|ZYTEN|MCH|MCV|neutrophile|baso|eosinophile|globinge|hematocrit|leukocytes")) %>% colnames(),
+  "hemoglobin"
+)
+
+kidney_vars <- meta %>% 
+  select(matches("uric|urea|gfr|creatinine|crp_hs")) %>% 
+  colnames()
+
+coagulation_vars <- c("inr", "ptt", "quick")
+
+main_parameters <- c(energy_vars, liver_vars, blood_vars, kidney_vars, coagulation_vars)
+```
+
+# PCA
+
+## PCA 1: All parameters at time point D-1
+
+Analyze clinical parameters (metabolism, liver, kidney function, blood cells) at baseline (D-1).
+
+```{r}
+selected_data <- meta %>% 
+  select(ID, Timepoint, all_of(main_parameters)) %>% 
+  filter(Timepoint == "D-1") %>%
+  select(where(~ all(!is.na(.))))   # Remove columns with NA
+  
+```
+
+```{r pca1-compute}
+# Prepare data matrix and compute PCA (numeric parameters only)
+mat <- t(selected_data %>% select(-ID, -Timepoint))
+metadata <- selected_data %>% select(ID, Timepoint)
+colnames(mat) <- rownames(metadata)
+
+pca_baseline <- pca(mat, metadata = metadata, removeVar = 0)
+myscreeplot(pca_baseline, components = 1:6)
+```
+
+```{r pca1-plot, fig.width=20, fig.height=8}
+# PCA biplots (PC1 vs PC2, PC3 vs PC4)
+common_theme <- theme(
+  legend.position = "none",
+  plot.title = element_text(hjust = 0.2,
+                            size = 11,
+                            margin = margin(b = -30)),
+  plot.margin = margin(t = 20, r = 5, b = 0, l = 5),
+  axis.text.x = element_blank(), 
+  axis.text.y = element_blank(),
+  axis.title = element_text(size = 9)
+)
+
+p1_12 <- biplot(pca_baseline,
+  showLoadings = FALSE,
+  colby = "ID",
+  lab = NULL,
+  pointSize = 2,
+  subtitle = NULL
+) +
+  common_theme + 
+  scale_color_manual(values = rep("grey40", 32), drop = FALSE)
+
+p1_34 <- biplot(pca_baseline,
+  x = "PC3", y = "PC4",
+  showLoadings = FALSE,
+  colby = "ID",
+  lab = NULL,
+  pointSize = 2,
+  subtitle = NULL
+) +
+  scale_color_manual(values = rep("grey40", 32), drop = FALSE) +
+  # scale_color_manual(values = patient_colors, drop = FALSE) +
+  common_theme
+
+pf1 <- p1_12 + p1_34 + 
+  plot_layout(guides = "collect") +
+  plot_annotation(title = "PCA Analysis 1: Time Point D-1") &
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, margin = margin(b = -10)),
+    plot.margin = margin(t = 15, r = 5, b = -5, l = 10)
+  )
+
+pf1
+```
+
+
+```{r pca1-loadings, fig.width=16, fig.height=10}
+# Loadings with group background shading
+df_loadings <- pca_baseline$loadings[, 1:6] %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Factors") %>%
+  pivot_longer(cols = -Factors, names_to = "PC", values_to = "Loadings") %>%
+  mutate(
+    Factors = factor(Factors, levels = main_parameters),
+    Group = case_when(
+      Factors %in% energy_vars      ~ "Energy metabolism",
+      Factors %in% liver_vars       ~ "Liver function",
+      Factors %in% blood_vars       ~ "Blood cells",
+      Factors %in% kidney_vars      ~ "Kidney function",
+      Factors %in% coagulation_vars ~ "Coagulation",
+      TRUE                          ~ "Other"
+    ),
+    Group = factor(
+      Group,
+      levels = c(
+        "Kidney function", "Blood cells", "Liver function",
+        "Energy metabolism", "Coagulation", "Other"
+      )
+    )
+  )
+
+# Order factors by group for consistent background blocks
+factor_levels <- df_loadings %>%
+  distinct(Factors, Group) %>%
+  arrange(Group, Factors) %>%
+  pull(Factors) %>%
+  as.character()
+
+df_loadings <- df_loadings %>%
+  mutate(Factors = factor(Factors, levels = factor_levels))
+
+# Background rectangles per group
+background_df <- df_loadings %>%
+  select(Factors, Group) %>%
+  distinct() %>%
+  mutate(
+    ymin = as.numeric(Factors) - 0.5,
+    ymax = as.numeric(Factors) + 0.5,
+    xmin = -Inf,
+    xmax = Inf
+  )
+
+pf1_loadings <- ggplot(df_loadings, aes(x = Loadings, y = Factors, color = Loadings)) +
+  geom_rect(
+    data = background_df,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = Group),
+    inherit.aes = FALSE,
+    alpha = 0.1
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+  geom_point(size = 2) +
+  scale_color_gradientn(
+    colors = c("red", "blue", "red"),
+    values = c(0, 0.5, 1),
+    limits = c(-1, 1)
+  ) +
+  facet_grid(. ~ PC, scales = "free") +
+  theme_bw(base_size = 14) +
+  xlim(-1, 1) +
+ theme(
+    legend.position = "right",
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    axis.title.x = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    plot.margin = margin(t = -10, r = 0, b = 0, l = 0)
+  ) +
+  labs(
+    x = "PCA Loadings",
+    y = "",
+    color = "Loadings",
+    fill = "Parameters",
+    title = ""
+  )
+
+pf1_loadings
+```
+
+## PCA 2: Changes compared to D-1
+
+Analyze parameter changes: Δ[D+10, D-1] and Δ[M+1, D-1].
+
+```{r pca2-prepare}
+# Get parameter columns
+selected_data <- meta %>% 
+  select(ID, Timepoint, all_of(main_parameters))
+
+param_names <- setdiff(names(selected_data), c("ID", "Timepoint"))
+
+# Pivot wider to get one row per patient
+data_wide <- selected_data %>%
+  pivot_wider(
+    names_from = Timepoint,
+    values_from = all_of(param_names),
+    names_sep = "_"
+  )
+
+# Compute deltas for each parameter explicitly
+after_diff <- data_wide %>%
+  select(ID) %>%
+  bind_cols(
+    map_dfc(param_names, function(param) {
+      baseline_col <- paste0(param, "_D-1")
+      after_col <- paste0(param, "_D+10")
+      tibble(!!param := data_wide[[after_col]] - data_wide[[baseline_col]])
+    })
+  ) %>%
+  mutate(Time = "ΔD+10")
+
+fup1_diff <- data_wide %>%
+  select(ID) %>%
+  bind_cols(
+    map_dfc(param_names, function(param) {
+      baseline_col <- paste0(param, "_D-1")
+      fup_col <- paste0(param, "_M+1")
+      tibble(!!param := data_wide[[fup_col]] - data_wide[[baseline_col]])
+    })
+  ) %>%
+  mutate(Time = "ΔM+1")
+
+# Combine and prepare for PCA
+delta_data <- bind_rows(after_diff, fup1_diff) %>%
+  select(where(~ all(!is.na(.))))   # Remove columns with NA
+mat <- t(delta_data %>% select(-ID, -Time))
+metadata <- delta_data %>% 
+  select(ID, Time) %>%
+  mutate(Time = factor(Time, levels = c("ΔD+10", "ΔM+1")))
+colnames(mat) <- rownames(metadata)
+
+pca_delta <- pca(mat, metadata = metadata, removeVar = 0)
+myscreeplot(pca_delta, components = 1:6)
+```
+
+```{r pca2-plot, fig.width=20, fig.height=10}
+# Scores are samples x PCs
+scores_df <- as.data.frame(pca_delta$rotated) %>%
+    tibble::rownames_to_column("sample_ID") %>%
+    left_join(
+        pca_delta$metadata %>% tibble::rownames_to_column("sample_ID"),
+        by = "sample_ID"
+    )
+
+# Check
+stopifnot(all(c("PC1", "PC2", "Time") %in% colnames(scores_df)))
+
+pf2 <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Time)) +
+  geom_point(size = 2, alpha = 0.9) +
+  scale_color_manual(values = c("ΔD+10" = "#4169E1", "ΔM+1" = "#E35B53")) +
+  labs(
+    title = "PCA Analysis 2: Δ[D+10, D-1] and Δ[M+1, D-1]",
+    x = paste0("PC1,", round(pca_delta$variance[1], 1), "% variation"),
+    y = paste0("PC2,", round(pca_delta$variance[2], 1), "% variation")
+  ) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.2, size = 11, margin = margin(b = 10)),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 5),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 9),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9)
+  )
+
+pf2 + theme(legend.margin = margin(t=0, r=5, b=0, l=-10))
+```
+
+
+```{r pca2-loadings, fig.width=16, fig.height=10}
+# Prepare loadings data with parameter groupings
+df_loadings <- as.data.frame(pca_delta$loadings) %>%
+  tibble::rownames_to_column("Factors") %>%
+  select(Factors, tidyselect::any_of(paste0("PC", 1:4))) %>%
+  pivot_longer(
+    cols = starts_with("PC"),
+    names_to = "PC",
+    values_to = "Loadings"
+  ) %>%
+  mutate(
+    Factors = factor(Factors, levels = main_parameters),
+    Group = case_when(
+      Factors %in% energy_vars       ~ "Energy metabolism",
+      Factors %in% liver_vars        ~ "Liver function",
+      Factors %in% blood_vars        ~ "Blood cells",
+      Factors %in% kidney_vars       ~ "Kidney function",
+      Factors %in% coagulation_vars  ~ "Coagulation",
+      TRUE                           ~ "Other"
+    ),
+    Group = factor(
+      Group,
+      levels = c("Kidney function", "Blood cells", "Liver function",
+                 "Energy metabolism", "Coagulation", "Other")
+    )
+  ) %>%
+  arrange(Group, Factors, PC)
+
+factor_levels <- df_loadings %>%
+  distinct(Factors, Group) %>%
+  mutate(
+    Factors = factor(Factors, levels = main_parameters),
+    Group = factor(Group, levels = c(
+      "Kidney function", "Blood cells", "Liver function",
+      "Energy metabolism", "Coagulation", "Other"
+    ))
+  ) %>%
+  arrange(Group, Factors) %>%
+  pull(Factors) %>%
+  as.character()
+
+df_loadings <- df_loadings %>%
+  mutate(Factors = factor(Factors, levels = factor_levels))
+
+# Background rectangles for groups
+background_df <- df_loadings %>%
+  select(Factors, Group) %>%
+  distinct() %>%
+  mutate(
+    ymin = as.numeric(Factors) - 0.5,
+    ymax = as.numeric(Factors) + 0.5,
+    xmin = -Inf,
+    xmax = Inf
+  )
+
+# Add variance explained to PC labels
+pc_labels <- paste0("PC", 1:4, ": ", round(pca_delta$variance[1:4], 1), "%")
+df_loadings <- df_loadings %>%
+  mutate(PC_labels = pc_labels[as.numeric(sub("PC", "", PC))])
+
+# Plot loadings with group backgrounds
+pf3 <- ggplot(df_loadings, aes(x = Loadings, y = Factors, color = Loadings)) +
+  geom_rect(
+    data = background_df,
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = Group),
+    inherit.aes = FALSE, alpha = 0.1
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+  geom_point(size = 2) +
+  scale_color_gradientn(
+    colors = c("red", "blue", "red"),
+    values = c(0, 0.5, 1),
+    limits = c(-1, 1)
+  ) +
+  facet_grid(. ~ PC_labels, scales = "free") +
+  theme_bw(base_size = 14) +
+  xlim(-1, 1) +
+  theme(
+    legend.position = "right",
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    axis.title.x = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    plot.margin = margin(t = -10, r = 0, b = 0, l = 0)
+  ) +
+  labs(x = "PCA Loadings", y = "", color = "Loadings", title = "", fill = "Parameters")
+
+pf3
+```
+

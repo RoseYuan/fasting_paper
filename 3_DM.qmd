@@ -1,0 +1,667 @@
+---
+title: "Differential methylation analysis"
+format:
+  html:
+    theme: sandstone
+    embed-resources: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      class.output="bg-light")
+```
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(tidyr)
+library(cowplot)
+library(dplyr)
+library(sesame)
+library(sesameData)
+library(readxl)
+library(limma)
+library(UpSetR)
+library(minfi)
+library(DMRcate)
+library(missMethyl)
+library(ggpubr)
+library(knitr)
+library(gridExtra)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(enrichplot)
+source("utils.R")
+theme_set(theme_minimal())
+```
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+proj_dir <- "~/public/SiyuanLuo/projects/fasting_clinics/publication"
+setwd(proj_dir)
+betass <- readRDS("./data/cleaned_beta_s.RDS")
+betasp <- readRDS("./data/cleaned_beta_p.RDS")
+
+meta <- read.csv(file="./data/meta_3timepoints.csv")
+meta <- meta %>% filter(meta$Sample %in% colnames(betass))
+meta$ID <- factor(meta$ID) 
+```
+
+```{r}
+# calculate M-values for statistical analysis
+# using all samples
+M_values <- log2(betass/(1-betass))
+mdsPlot(M_values, numPositions=1000,
+        sampNames = NULL, sampGroups=meta$Timepoint)
+```
+
+Timepoint doesn’t separate the methylation data.
+
+Due to the longitudinal design, use a mixed effect model.
+
+Since we loaded the uncorrected data, we use the Date_Scan as a fixed effect for controlling batch effect.
+
+# Compare between timepoints
+
+::: {.callout-note}
+Outlier removal:
+* blood cells:
+  * patient 28 is an outlier due to high thrombocytes. This is unlikely to affect the DNA composition.
+  * patient 29 is an outlier due to low MCH (Mean Corpuscular Hemoglobin). This is unlikely to affect the DNA composition.
+* liver function: patient 10, 2, 14
+* energy metabolism: patient 10
+
+Let’s remove patient 10 since the BMI is also extreme. 
+
+I tried keeping vs removing 2 and 14 and in the end decide to keep them.
+:::
+
+```{r}
+meta <- meta %>% filter(as.character(ID) !=10)
+rownames(meta) <- meta$Sample
+M_values <- M_values[, rownames(meta)]
+
+meta <- meta[!is.na(meta$Sample),]
+rownames(meta) <- meta$Sample
+meta <- meta[colnames(M_values),]
+
+# Create a model matrix for time points and any other covariates
+meta$Timepoint2 <- factor(meta$Timepoint, levels = c("D-1", "D+10", "M+1"))
+meta <- meta %>%
+  mutate(Timepoint = case_when(
+    Timepoint2 == "D-1"  ~ "BEFORE",
+    Timepoint2 == "D+10" ~ "AFTER",
+    Timepoint2 == "M+1"  ~ "FUP1",
+    TRUE ~ Timepoint2
+  )) %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("BEFORE","AFTER","FUP1"))) %>%
+  mutate(ID_Patient = factor(ID_Patient))
+meta$Date_Scan_recode <- factor(as.numeric(factor(meta$Date_Scan)))
+meta$sex <- factor(meta$sex)
+
+# Sanity check for covaraites
+stopifnot(all(c("NEUTROPHILE","LYMPHOZYTEN") %in% colnames(meta)))
+meta <- meta %>%
+  mutate(
+    NEUTROPHILE = as.numeric(NEUTROPHILE),
+    LYMPHOZYTEN = as.numeric(LYMPHOZYTEN)
+  )
+stopifnot(!anyNA(meta$NEUTROPHILE), !anyNA(meta$LYMPHOZYTEN))
+```
+
+::: {.panel-tabset}
+## Model 1
+Model: Timepoint2 + Date_Scan + age + sex + (1 | ID_Patient)
+
+### DMP
+```{r}
+design <- model.matrix(~ 0 + Timepoint + Date_Scan_recode + age + sex, data = meta)
+```
+
+```{r, eval=FALSE}
+# Estimate correlations between repeated measures from the same individual
+corfit <- duplicateCorrelation(M_values, design, block = meta$ID_Patient)
+saveRDS(corfit, file="./data/corfit_design1_rm10.RDS")
+```
+
+```{r}
+corfit <- readRDS(file="./data/corfit_design1_rm10.RDS")
+corfit$consensus
+```
+
+```{r}
+# fit the linear model
+fit <- lmFit(M_values, design, block=meta$ID_Patient, correlation = corfit$consensus)
+# Apply the contrasts and compute eBayes statistics
+# Define pairwise contrasts
+contrasts <- makeContrasts(
+  BEFORE_vs_AFTER = TimepointBEFORE - TimepointAFTER,
+  BEFORE_vs_FUP1 = TimepointBEFORE - TimepointFUP1,
+  AFTER_vs_FUP1 = TimepointAFTER - TimepointFUP1,
+  age = age,
+  Female_vs_Male = sex1,
+  levels = design
+)
+fit2 <- contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+
+# Extract results for each contrast
+results_BEFORE_vs_AFTER <- topTable(fit2, coef = "BEFORE_vs_AFTER", number = Inf)
+results_BEFORE_vs_FUP1 <- topTable(fit2, coef = "BEFORE_vs_FUP1", number = Inf)
+results_AFTER_vs_FUP1 <- topTable(fit2, coef = "AFTER_vs_FUP1", number = Inf)
+results_age <- topTable(fit2, coef = "age", number = Inf)
+results_sex <- topTable(fit2, coef = "Female_vs_Male", number = Inf)
+
+# look at the numbers of DM CpGs at FDR < 0.05
+kable(summary(decideTests(fit2, adjust.method="fdr")))
+```
+
+```{r}
+saveRDS(fit2, file="./data/fit_model1.RDS")
+```
+
+#### Check the effect size
+The distribution of log-fold change:
+
+```{r}
+hist(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<0.05, "logFC"], 
+     breaks=50,
+     main = "Histogram of logFC for significant BEFORE vs FUP1 CpGs")
+```
+
+Check the overlap between DMPs between pairs of timepoints:
+
+```{r}
+dm <- list(BEFORE_vs_FUP1_up = rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<0.05 & results_BEFORE_vs_FUP1$logFC>0,]),
+           BEFORE_vs_FUP1_down = rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<0.05 & results_BEFORE_vs_FUP1$logFC<0,]),
+     AFTER_vs_FUP1_down = rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<0.05 & results_AFTER_vs_FUP1$logFC<0,]),
+    AFTER_vs_FUP1_up = rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<0.05 & results_AFTER_vs_FUP1$logFC>0,]))
+
+upset(fromList(dm), empty.intersections = TRUE)
+```
+
+Plotting the top few differentially methylated CpGs:
+
+##### Age
+```{r}
+sapply(rownames(results_age)[1:6], function(cpg){
+  plotCpg(betass[, meta$Sample], cpg=cpg, pheno=meta$age, ylab = "Beta values")
+})
+```
+
+##### Sex
+```{r}
+sapply(rownames(results_sex)[1:6], function(cpg){
+  plotCpg(betass[,meta$Sample], cpg=cpg, pheno=meta$Gender, ylab = "Beta values")
+})
+```
+
+#### BEFORE vs FUP1
+
+```{r}
+sapply(rownames(results_BEFORE_vs_FUP1)[1:9], function(cpg){
+  plotCpg(betass[,meta$Sample], cpg=cpg, pheno=meta$Timepoint, ylab = "Beta values")
+})
+```
+
+```{r}
+tmp <- data.frame(betass[rownames(results_BEFORE_vs_FUP1)[1:9], meta$Sample]) 
+tmp$cpg <- rownames(tmp)
+tmp <- tmp%>% pivot_longer(cols = -cpg, names_to = "Sample", values_to = "beta")
+tmp$Sample <- sub("X", "", tmp$Sample)
+
+merge(tmp, meta, by="Sample") %>% 
+  filter(Timepoint %in% c("BEFORE", "FUP1")) %>%
+  ggplot(aes(x=Timepoint, y=beta, color=Gender, group=ID_Patient)) + 
+  geom_point() + 
+  geom_line() + 
+  facet_wrap(~cpg, scales = "free") + 
+  labs(title="BEFORE vs FUP1")
+```
+
+### GO testing
+#### BEFORE_vs_FUP1
+```{r}
+DMPs <- results_BEFORE_vs_FUP1
+head(DMPs)
+
+# Get the significant CpG sites at less than 5% FDR
+sigCpGs <- rownames(DMPs[DMPs$adj.P.Val<0.05,])
+# First 10 significant CpGs
+sigCpGs[1:10]
+
+# Total number of significant CpGs at 5% FDR
+length(sigCpGs)
+
+# Get all the CpG sites used in the analysis to form the background
+all <- rownames(DMPs)
+# Total number of CpG sites tested
+length(all)
+
+# Run enrichment - Can take a bit of time...
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=all)
+
+# Top 10 GO categories
+topGSA(gst, number=30)
+```
+
+
+### DMR
+```{r}
+myAnnotation <- cpg.annotate(object = M_values, datatype = "array", what = "M",
+                                analysis.type= "differential", design = design,
+                                contrasts = TRUE, cont.matrix = contrasts,
+                                coef = "BEFORE_vs_FUP1", arraytype = "EPICv1", 
+                             fdr = 0.08)
+# Run DMRcate
+DMRs <- dmrcate(myAnnotation, lambda=1000, C=2)
+# convert the regions to annotated genomic ranges
+sigRegions <- extractRanges(DMRs)
+head(sigRegions)
+```
+
+```{r}
+hist(sigRegions[sigRegions$no.cpgs >=5,]$maxdiff, 
+     main="Histogram of BEFORE vs FUP1 DMR maxdiff",
+     breaks = 50)
+sigRegions[sigRegions$no.cpgs >=5 & sigRegions$maxdiff > 0.1,]
+```
+
+* PEX11B: Peroxisomal Biogenesis Factor 11 Beta
+* GNRHR2: Gonadotropin Releasing Hormone Receptor 2 (Pseudogene)
+* GPN2: ATP-Binding Domain 1 Family Member B
+* GPATCH3: G-Patch Domain Containing 3
+* LFNG: LFNG O-Fucosylpeptide 3-Beta-N-Acetylglucosaminyltransferase
+
+```{r}
+myAnnotation <- cpg.annotate(object = M_values, datatype = "array", what = "M",
+                                analysis.type= "differential", design = design,
+                                contrasts = TRUE, cont.matrix = contrasts,
+                                coef = "AFTER_vs_FUP1", arraytype = "EPICv1", 
+                             fdr = 0.1)
+```
+
+## Model 2
+Model: Timepoint + Date_Scan + age + sex + ? + (1 | ID_Patient)
+
+### Collect the candidate covariates
+Collect the candidate covariates
+* BMI_baseline_category/BMI_baseline
+* blood cell composition: "NEUTROPHILE", "LYMPHOZYTEN"
+
+### Check the covariates + timepoint
+```{r}
+# covariate sets
+candidate_covariates <- list(
+  "NEUTROPHILE + LYMPHOZYTEN",
+  "BMI_baseline_category",
+  "BMI_baseline"
+)
+names(candidate_covariates) <- unlist(candidate_covariates)
+
+# Build formulas (no intercept, so timepoint has separate columns)
+models <- lapply(candidate_covariates, function(cov_rhs) {
+  as.formula(paste("~ 0 + Timepoint + Date_Scan_recode + age + sex +", cov_rhs))
+})
+
+# Helper to make filename-safe labels
+safe_name <- function(x) gsub("[^A-Za-z0-9_]+", "_", x)
+
+# Ensure factor coding is as expected (important for sex and timepoint column names)
+# meta$Timepoint <- factor(meta$Timepoint, levels = c("BEFORE","AFTER","FUP1"))
+# meta$sex <- relevel(factor(meta$sex), ref = "0")  # depends on your encoding
+
+for (model_name in names(models)) {
+
+  design <- model.matrix(models[[model_name]], data = meta)
+  colnames(design) <- make.names(colnames(design))  # robust; avoids weird column names
+
+  # --- correlation fit caching ---
+  corfit_file <- file.path("./data", paste0("corfit_", safe_name(model_name), ".RDS"))
+  if (!file.exists(corfit_file)) {
+    corfit <- duplicateCorrelation(M_values, design, block = meta$ID_Patient)
+    saveRDS(corfit, corfit_file)
+  }
+  corfit <- readRDS(corfit_file)
+
+  # --- fit model ---
+  fit <- lmFit(M_values, design, block = meta$ID_Patient, correlation = corfit$consensus)
+
+  # --- define ONLY the timepoint contrasts ---
+  # IMPORTANT: use the *actual* coefficient names in design
+  # (after make.names). Usually these will be "TimepointBEFORE", etc.
+  tp_cols <- grep("^Timepoint", colnames(design), value = TRUE)
+  # sanity check
+  stopifnot(all(c("TimepointBEFORE", "TimepointAFTER", "TimepointFUP1") %in% tp_cols))
+
+  contrasts <- makeContrasts(
+    BEFORE_vs_AFTER = TimepointBEFORE - TimepointAFTER,
+    BEFORE_vs_FUP1  = TimepointBEFORE - TimepointFUP1,
+    AFTER_vs_FUP1   = TimepointAFTER  - TimepointFUP1,
+    levels = design
+  )
+
+  fit2 <- contrasts.fit(fit, contrasts)
+  fit2 <- eBayes(fit2)
+
+  # --- extract timepoint results ---
+  res_BEFORE_vs_AFTER <- topTable(fit2, coef = "BEFORE_vs_AFTER", number = Inf)
+  res_BEFORE_vs_FUP1  <- topTable(fit2, coef = "BEFORE_vs_FUP1",  number = Inf)
+  res_AFTER_vs_FUP1   <- topTable(fit2, coef = "AFTER_vs_FUP1",   number = Inf)
+
+  # --- extract covariate results from the *original* fit (not contrast fit) ---
+  # Covariates are not contrasts; they are coefficients in `fit`.
+  fit_cov <- eBayes(fit)
+
+  res_age <- topTable(fit_cov, coef = "age", number = Inf)
+
+  # sex coefficient name depends on coding. If sex is numeric 0/1, model.matrix gives "sex"
+  # If sex is factor with 2 levels, it might be "sex1" or "sexFemale".
+  sex_coef <- grep("^sex", colnames(design), value = TRUE)
+  # prefer the non-timepoint sex coefficient (exclude any weird matches)
+  sex_coef <- setdiff(sex_coef, tp_cols)
+  # pick one if exactly one
+  if (length(sex_coef) == 1) {
+    res_sex <- topTable(fit_cov, coef = sex_coef, number = Inf)
+  } else {
+    res_sex <- NULL  # or stop() if you want strictness
+  }
+
+  # covariate(s) – could be 1 term or multiple (NEUTROPHILE + LYMPHOZYTEN)
+  cov_terms <- all.vars(as.formula(paste("~", model_name)))
+  cov_coefs <- cov_terms[cov_terms %in% colnames(design)]
+  # If BMI_baseline_category expands to multiple dummy columns, capture them:
+  cov_coefs <- c(cov_coefs, grep("^BMI_baseline_category", colnames(design), value = TRUE))
+  cov_coefs <- unique(cov_coefs)
+
+  res_cov <- lapply(cov_coefs, function(cc) topTable(fit_cov, coef = cc, number = Inf))
+  names(res_cov) <- cov_coefs
+
+  # --- summaries ---
+  print(knitr::kable(summary(decideTests(fit2, adjust.method = "fdr"))))
+  cat("\n\n<!-- -->\n\n")
+
+  # --- save ---
+  saveRDS(
+    list(
+      fit2 = fit2,
+      fit_cov = fit_cov,
+      results = list(
+        BEFORE_vs_AFTER = res_BEFORE_vs_AFTER,
+        BEFORE_vs_FUP1  = res_BEFORE_vs_FUP1,
+        AFTER_vs_FUP1   = res_AFTER_vs_FUP1,
+        age = res_age,
+        sex = res_sex,
+        covariates = res_cov
+      ),
+      design_colnames = colnames(design),
+      model = models[[model_name]]
+    ),
+    file = file.path("./data", paste0("fit_model2_", safe_name(model_name), ".RDS"))
+  )
+}
+```
+
+Some observations
+
+- BMI_baseline do have effects on the methylation levels. Since it shouldn’t confound the time effect, it should be added as an interaction term.
+- NEUTROPHILE/LYMPHOZYTEN do have strong effects on the methylation levels, but it is independent of the time effect (from previous correlation analysis), suggesting that it is a strong confounding factor. It should be adjusted for. This can be validated via analyzing the DM CpGs associated to NEUTROPHILE/LYMPHOZYTEN.
+
+## Model 3
+Model: Timepoint * BMI_baseline + Date_Scan + age + sex + (1 | ID_Patient)
+
+When adding a continuous variable in the interaction term, it is important to model the intercept. For categorical variable only, no interaction term is fine.
+
+```{r}
+meta$BMI_baseline_centered <- scale(meta$BMI_baseline, center = TRUE, scale = FALSE)
+design <-model.matrix(~ Timepoint*BMI_baseline_centered + Date_Scan_recode + age + sex, data = meta)
+corfit_file <- paste0("./data/corfit_design3_interaction.RDS")
+  if (!file.exists(corfit_file)) {
+    corfit <- duplicateCorrelation(M_values, design, block = meta$ID_Patient)
+    saveRDS(corfit, file = corfit_file)
+  }
+  corfit <- readRDS(corfit_file)
+  # fit the linear model
+colnames(design) <- make.names(colnames(design))
+fit <- lmFit(M_values, design, block=meta$ID_Patient, correlation = corfit$consensus)
+# Define pairwise contrasts
+contrasts <- makeContrasts(
+  age = age,
+  Female_vs_Male = sex1,
+  BMI_baseline = BMI_baseline_centered,
+  BEFORE_vs_AFTER = TimepointAFTER,
+  BEFORE_vs_FUP1 = TimepointFUP1,
+  AFTER_vs_FUP1 = TimepointAFTER - TimepointFUP1,
+  BMI_slope_AFTER_vs_BEFORE = TimepointAFTER.BMI_baseline_centered,  # Does BMI modify T2 vs. T1?
+  BMI_slope_FUP1_vs_BEFORE = TimepointFUP1.BMI_baseline_centered,  # Does BMI modify T3 vs. T1?
+  BMI_slope_FUP1_vs_AFTER = TimepointFUP1.BMI_baseline_centered - TimepointAFTER.BMI_baseline_centered,  # Does BMI modify T3 vs. T2?
+  levels = colnames(design)
+)
+fit2 <- contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+# look at the numbers of DM CpGs at FDR < 0.05
+kable(summary(decideTests(fit2, adjust.method="fdr")))
+saveRDS(fit2, file="./data/fit_model3_interaction.RDS")
+```
+:::
+
+# BEFORE vs FUP1
+## Compare CpGs in model 1 and model 2
+```{r}
+# model 1
+design <- model.matrix(~ 0 + Timepoint + Date_Scan_recode + age + sex, data = meta)
+corfit <- readRDS(file="corfit_design1_rm10_2_14.RDS")
+fit <- lmFit(M_values, design, block=meta$ID_Patient, correlation = corfit$consensus)
+contrasts <- makeContrasts(
+  AFTER_vs_FUP1 = TimepointAFTER - TimepointFUP1,
+  levels = design
+)
+fit2 <- contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+
+# Extract results for each contrast
+results_AFTER_vs_FUP1 <- topTable(fit2, coef = "AFTER_vs_FUP1", number = Inf)
+summary(decideTests(fit2, adjust.method="fdr"))
+```
+
+```{r}
+p_th <- 0.05
+lfc_th <- 0
+sigCpGsModel1 <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th,])
+dm <- list(model1_up = rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & results_AFTER_vs_FUP1$logFC> lfc_th,]),
+           model1_down = rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & results_AFTER_vs_FUP1$logFC< -lfc_th,]))
+```
+
+```{r}
+# model 2
+design <- model.matrix(~ 0 + Timepoint + Date_Scan_recode + age + sex + NEUTROPHILE + LYMPHOZYTEN, data = meta)
+corfit_file <- paste0("corfit_", "NEUTROPHILE_LYMPHOZYTEN", ".RDS")
+if (!file.exists(corfit_file)) {
+  corfit <- duplicateCorrelation(M_values, design, block = meta$ID_Patient)
+  saveRDS(corfit, file = corfit_file)
+}
+corfit <- readRDS(corfit_file)
+fit <- lmFit(M_values, design, block=meta$ID_Patient, correlation = corfit$consensus)
+contrasts <- makeContrasts(
+  BEFORE_vs_AFTER = TimepointBEFORE - TimepointAFTER,
+  BEFORE_vs_FUP1 = TimepointBEFORE - TimepointFUP1,
+  AFTER_vs_FUP1 = TimepointAFTER - TimepointFUP1,
+  NEUTROPHILE = NEUTROPHILE,
+  LYMPHOZYTEN = LYMPHOZYTEN,
+  levels = design
+)
+fit2 <- contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+
+# Extract results for each contrast
+results_BEFORE_vs_AFTER <- topTable(fit2, coef = "BEFORE_vs_AFTER", number = Inf)
+results_BEFORE_vs_FUP1 <- topTable(fit2, coef = "BEFORE_vs_FUP1", number = Inf)
+results_AFTER_vs_FUP1 <- topTable(fit2, coef = "AFTER_vs_FUP1", number = Inf)
+results_NEUTROPHILE/LYMPHOZYTEN <- topTable(fit2, coef = "NEUTROPHILE/LYMPHOZYTEN", number = Inf)
+summary(decideTests(fit2, adjust.method="fdr"))
+```
+
+```{r}
+sigCpGsModel2 <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th,])
+
+dm$model2_up <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & results_AFTER_vs_FUP1$logFC> lfc_th,])
+dm$model2_down <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & results_AFTER_vs_FUP1$logFC< -lfc_th,])
+dm$NEUTROPHILE/LYMPHOZYTEN_up <- rownames(results_NEUTROPHILE/LYMPHOZYTEN[results_NEUTROPHILE/LYMPHOZYTEN$adj.P.Val<p_th & results_NEUTROPHILE/LYMPHOZYTEN$logFC> lfc_th,])
+dm$NEUTROPHILE/LYMPHOZYTEN_down <- rownames(results_NEUTROPHILE/LYMPHOZYTEN[results_NEUTROPHILE/LYMPHOZYTEN$adj.P.Val<p_th & results_NEUTROPHILE/LYMPHOZYTEN$logFC< -lfc_th,])
+
+upset(fromList(dm[c("model1_up", "model1_down","model2_up", "model2_down")]))
+upset(fromList(dm[c("model1_up", "model2_up", "NEUTROPHILE/LYMPHOZYTEN_up")]))
+upset(fromList(dm[c("model1_down", "model2_down", "NEUTROPHILE/LYMPHOZYTEN_down")]))
+```
+
+So it is true that almost all DM CpGs in model 2 are also present in model 1.
+
+## GO Testing for model 2
+```{r}
+sigCpGsModeldiff <- sigCpGsModel1[!sigCpGsModel1 %in% sigCpGsModel2]
+sigCpGs <- sigCpGsModel2
+check <- getMappedEntrezIDs(sig.cpg = sigCpGs)
+length(check$sig.eg)
+
+p_th <- 0.05
+lfc_th <- 0.3
+sigCpGs <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & abs(results_AFTER_vs_FUP1$logFC)>lfc_th,])
+check <- getMappedEntrezIDs(sig.cpg = sigCpGs)
+length(check$sig.eg)
+
+```
+
+::: {.panel-tabset}
+### GO
+```{r, fig.width=5, fig.height=10}
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), 
+              collection="GO", array.type = c("EPIC"),
+              plot.bias=TRUE, sig.genes = FALSE)
+
+topGSA(gst, n=20)
+
+gst2compareClusterResult <- function(gst, cluster, n_DE_genes, description="Description"){
+  gst$Cluster <- cluster
+  df <- data.frame(
+  Cluster = gst$Cluster,  
+  ID = rownames(gst),  # GO term ID
+  Description = gst[,description],  
+  GeneRatio = paste0(gst$DE, "/", n_DE_genes),  # Ratio of DE genes
+  pvalue = gst$P.DE,
+  p.adjust = gst$FDR,
+  qvalue = gst$FDR,  # No qvalue in gometh, so reuse FDR
+  Count = gst$DE)
+  
+  df <- df[order(sapply(df$GeneRatio, function(x){eval(parse(text=x))}), decreasing = TRUE),]
+# Convert to compareClusterResult object
+  compare_cluster_obj <- new(
+    "compareClusterResult",
+    compareClusterResult = df,
+    fun = "gometh"
+  )
+  return(compare_cluster_obj)
+}
+
+compare_cluster_obj <- gst2compareClusterResult(gst, 
+                         cluster="AFTER_vs_FUP1", 
+                         n_DE_genes=length(getMappedEntrezIDs(sig.cpg = sigCpGs)$sig.eg),
+                         description="TERM")
+
+enrichplot::dotplot(compare_cluster_obj, 
+                    showCategory = 20, 
+                    x = "GeneRatio", 
+                    color = "p.adjust", 
+                    size="count", 
+                    by = "GeneRatio")
+```
+
+### KEGG
+```{r, fig.width=5, fig.height=10}
+gst.kegg <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), 
+                   array.type = c("EPIC"), collection="KEGG",
+                   sig.genes = TRUE)
+
+topGSA(gst.kegg, n=20)
+
+compare_cluster_obj <- gst2compareClusterResult(gst.kegg, 
+                         cluster="AFTER_vs_FUP1", 
+                         n_DE_genes=length(getMappedEntrezIDs(sig.cpg = sigCpGs)$sig.eg),
+                         description="Description")
+
+enrichplot::dotplot(compare_cluster_obj, 
+                    showCategory = 20, 
+                    x = "GeneRatio", 
+                    color = "p.adjust", 
+                    size="count", 
+                    by = "GeneRatio")
+```
+
+### KEGG promoter
+```{r}
+gst.kegg.prom <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), array.type = c("EPIC"),
+                        collection="KEGG", genomic.features = c("TSS200",
+                                                                "TSS1500",
+                                                                "1stExon"))
+topGSA(gst.kegg.prom, n=20)
+
+compare_cluster_obj <- gst2compareClusterResult(gst.kegg.prom, 
+                         cluster="AFTER_vs_FUP1", 
+                         n_DE_genes=length(getMappedEntrezIDs(sig.cpg = sigCpGs)$sig.eg),
+                         description="Description")
+
+enrichplot::dotplot(compare_cluster_obj, 
+                    showCategory = 20, 
+                    x = "GeneRatio", 
+                    color = "p.adjust", 
+                    size="count", 
+                    by = "GeneRatio")
+```
+
+### KEGG gene body
+```{r}
+gst.kegg.body <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), 
+                        collection="KEGG", array.type = c("EPIC"), genomic.features = c("Body"))
+topGSA(gst.kegg.body, n=20)
+
+gst.kegg.body <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), 
+                        collection="KEGG", array.type = c("EPIC"), genomic.features = c("Body"), sig.genes = TRUE)
+topGSA(gst.kegg.body, n=10)
+```
+
+:::
+
+```{r}
+sigCpGsModel2 <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th,])
+```
+
+# Visualization
+```{r}
+for (cov in candidate_covariates) {
+  p1 <- meta %>% filter(Timepoint %in% c("BEFORE", "AFTER")) %>%
+    ggpaired(x = "Timepoint", y = cov, color = "Timepoint", 
+           line.color = "gray", line.size = 0.4, 
+           palette = c("#00AFBB", "#E7B800")) +
+    labs(x = "Time point", y=cov) +
+    ylim(min(meta[,cov]), max(meta[,cov])) +
+    stat_compare_means(paired = TRUE, label.y = max(meta[,cov]))
+  
+  p2 <- meta %>% filter(Timepoint %in% c("BEFORE", "FUP1")) %>%
+  ggpaired(x = "Timepoint", y = cov, color = "Timepoint", 
+           line.color = "gray", line.size = 0.4, 
+           palette = c("#00AFBB", "#FC4E07")) +
+    labs(x = "Time point", y=cov) +
+    ylim(min(meta[,cov]), max(meta[,cov])) +
+    stat_compare_means(paired = TRUE,  label.y = max(meta[,cov]))
+  
+  p3 <- meta %>% filter(Timepoint %in% c("AFTER", "FUP1")) %>%
+  ggpaired(x = "Timepoint", y = cov, color = "Timepoint", 
+           line.color = "gray", line.size = 0.4, 
+           palette = c("#E7B800", "#FC4E07")) +
+    labs(x = "Time point", y=cov) +
+   ylim(min(meta[,cov]), max(meta[,cov])) +
+    stat_compare_means(paired = TRUE,  label.y = max(meta[,cov]))
+  
+  grid.arrange(p1, p2, p3, ncol = 3)
+}
+```
+

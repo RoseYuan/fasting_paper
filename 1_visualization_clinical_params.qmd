@@ -1,0 +1,406 @@
+---
+title: "Visualization of clinical parameters"
+format:
+  html:
+    theme: sandstone
+    embed-resources: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(openxlsx)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(lme4)
+library(lmerTest) 
+library(emmeans)
+library(rstatix)
+library(ggplot2)
+library(ggeffects)
+library(ggthemes)
+library(splines)
+library(Polychrome)
+library(ggpubr)
+library(patchwork)
+source("utils.R")
+
+daily_meta <- read_csv("data/meta_daily.csv")
+meta3d <- read_csv("data/meta_3timepoints.csv")
+
+labels_daily <- c("D-2","D-1", "D0", paste0("D+", 1:16), "M+1")
+labels_4timepoint <- c("D-1", "D+3", "D+10", "M+1")
+labels_3timepoint <- c("D-1", "D+10", "M+1")
+```
+
+# Weight & BMI
+```{r}
+df <- daily_meta %>%
+  select(weight, Timepoint, ID, sex, age, BMI) %>%
+  filter(Timepoint != "D+17") %>% # because nothing is measured
+  mutate(ID = factor(ID, levels = unique(ID))) %>% 
+  mutate(BMI = as.numeric(BMI)) %>%
+  mutate(sex = factor(c("male","female")[sex + 1])) %>%
+  mutate(Timepoint = factor(Timepoint, levels = labels_daily)) %>%
+  mutate(numeric_timepoint = c(1:19, 25)[match(Timepoint, levels(Timepoint))]) %>%
+  mutate(day = numeric_timepoint - 3)
+```
+
+```{r}
+# Prepare data for modeling
+model <- lmer(weight ~ ns(numeric_timepoint, df=3) + (1 | ID), data = df)
+
+# Extract marginal predictions (population-level)
+pred <- ggpredict(model, terms = "numeric_timepoint [all]")
+pred <- pred %>% filter(x != 1)
+
+# Prepare data frame for plotting
+df_plot <- df %>%
+  filter(Timepoint != "D-2")
+
+# Build phase shading boundaries
+phase_df <- bind_rows(
+  tibble(
+    phase = "Fasting",
+    day_min = 1, day_max = 12
+  ),
+  tibble(
+    phase = "Refeeding",
+    day_min = 13, day_max = 16
+  )
+) %>%
+  left_join(
+    df_plot %>% distinct(day, numeric_timepoint),
+    by = c("day_min" = "day")
+  ) %>%
+  rename(xmin = numeric_timepoint) %>%
+  left_join(
+    df_plot %>% distinct(day, numeric_timepoint),
+    by = c("day_max" = "day")
+  ) %>%
+  rename(xmax = numeric_timepoint) %>%
+  select(phase, xmin, xmax) %>%
+  mutate(
+    xmin = xmin - 0.5,
+    xmax = xmax + 0.5
+  )
+
+phase_labels <- phase_df %>%
+  mutate(x = (xmin + xmax) / 2)
+
+# Create plot
+p_weight_trend <-
+  ggplot(df_plot, aes(x = numeric_timepoint, y = weight)) +
+  # Phase shading
+  geom_rect(
+    data = phase_df,
+    aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = phase),
+    inherit.aes = FALSE,
+    alpha = 0.2
+  ) +
+  scale_fill_manual(values = c(Fasting = "grey20", Refeeding = "grey60"), guide = "none") +
+  annotate(
+    "text",
+    x = phase_labels$x,
+    y = Inf,
+    label = phase_labels$phase,
+    vjust = 1.4,
+    size = 4,
+    color = "black"
+  ) +
+  # Individual trends (de-emphasized)
+  geom_line(aes(group = ID), color = "#6B7C93", alpha = 0.5, linewidth = 0.5) +
+  geom_point(aes(group = ID), color = "#6B7C93", alpha = 0.55, size = 0.1) +
+  # Mean trend + 95% CI
+  geom_ribbon(
+    data = pred,
+    aes(x = x, ymin = conf.low, ymax = conf.high),
+    inherit.aes = FALSE,
+    fill = "#0033FF",
+    alpha = 0.25
+  ) +
+  geom_line(
+    data = pred,
+    aes(x = x, y = predicted),
+    inherit.aes = FALSE,
+    color = "#0033FF",
+    linewidth = 1.2
+  ) +
+  scale_x_continuous(
+    breaks = unique(df_plot$numeric_timepoint),
+    labels = labels_daily[2:20]
+  ) +
+  labs(x = "Time Point", y = "Weight (kg)") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.margin = margin(t = 20, l = 10),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  ) 
+
+data_p_weight_trend <- df_plot
+save(p_weight_trend, data_p_weight_trend, file = "figures/p_weight_trends.RData")
+```
+
+```{r}
+tmp <- meta3d[,c("ID","Timepoint","age","Gender","BMI","BMI_baseline_category")] %>% 
+  mutate(Gender=factor(Gender)) %>%
+  mutate(ID=factor(ID)) %>%
+  filter(Timepoint=="D-1") %>% 
+  drop_na(Gender)
+tmp$BMI_baseline_category <- factor(tmp$BMI_baseline_category, levels = c("Underweight", "Healthy", "Overweight", "Obesity", "Severe Obesity"))
+table(tmp$BMI_baseline_category)
+
+# Define the background shading
+bmi_ranges <- data.frame(
+  ymin = c(15, 18.5, 25, 30, 40),
+  ymax = c(18.5, 25, 30, 40, 45),
+  category = c("Underweight", "Healthy", "Overweight", "Obesity", "Severe Obesity")
+)
+bmi_ranges$category <- factor(bmi_ranges$category, levels = c("Underweight", "Healthy", "Overweight", "Obesity", "Severe Obesity"))
+
+
+p_bmi_category <- ggplot() +
+  geom_rect(data = bmi_ranges, aes(ymin = ymin, ymax = ymax, xmin = -Inf, xmax = Inf, fill = category), alpha = 0.3) +
+  geom_jitter(data=tmp, aes(x = age, y = BMI, color=ID, shape=Gender), size=4, height=0) +
+  scale_fill_manual(values = c("Underweight" = "lightblue",
+                               "Healthy" = "lightgreen",
+                               "Overweight" = "yellow",
+                               "Obesity" = "orange",
+                               "Severe Obesity" = "red")) +
+  scale_color_manual(values = patient_colors, drop = FALSE) +
+  labs(x = "Age", y = "BMI at Baseline", color="Patient ID", fill="BMI Categories", shape="Sex") +
+  theme_minimal() + 
+ theme(
+    legend.position = "right",
+    legend.box = "vertical",     # Arrange legends side by side (columns)
+    legend.box.just = "left"       # Optional: aligns legends
+  ) +
+    guides(
+    color = "none",
+    fill = guide_legend(ncol = 1, order = 1),  # Stack fill above shape
+    shape = guide_legend(ncol = 1, order = 2)  # Make sure shape is after fill
+  ) +
+  ylim(15, 45) 
+
+p_bmi_category
+
+save(p_bmi_category, file = "figures/p_bmi_category.RData")
+```
+
+## Blood parameters
+
+```{r}
+# ============================================================================ #
+# COLLEAGUE INPUT: Parameter lists for visualization
+# Update these when your colleague provides the final selections
+# ============================================================================ #
+
+# List 1: All parameters to display in comprehensive analysis
+bp_vars <- daily_meta %>% select(matches("pulse|dbp|sbp")) %>% colnames()
+energy_vars <- daily_meta %>% select(matches("glucose|insulin|Homa|glykohemoglobin|glyceride|cholester|hdl|ldl|Ketosemia")) %>% colnames()
+liver_vars <- daily_meta %>% select(matches("bilirubin|alk|ggt|got|gpt")) %>% colnames()
+blood_vars <- c(daily_meta %>% select(matches("cytes|_abs|ZYTEN|MCH|MCV|neutrophile|baso|eosinophile|globinge|hematocrit|leukocytes")) %>% colnames(), "hemoglobin")
+kidney_vars <- daily_meta %>% select(matches("uric|urea|gfr|creatinine|crp_hs")) %>% colnames()
+coagulation_vars <- c("inr", "ptt", "quick")
+
+main_parameters <- c(bp_vars, energy_vars, liver_vars, blood_vars, kidney_vars, coagulation_vars)
+
+custom_labels <- c(
+  Ketosemia = "Ketones Bodies (mmol/L)",
+  Homa = "HOMA-IR",
+  glykohemoglobin = "Glycohemoglobin (mmol/mol)",
+  triglyceride = "Triglycerides (TG) (mg/dL)",
+  ldl_hdl_ratio = "LDL/HDL Ratio",
+  `gpt/ALT` = "GPT/ALT (U/L)",
+  Bilirubin = "Bilirubin (mg/dL)",
+  alk_phosphatase = "Alkaline Phosphatase (IU/L)",
+  thrombocytes = "Thrombocytes (xE9/L)",
+  NLR = "Neutrophil-to-Lymphocyte Ratio",
+  inr = "Quick / INR Test",
+  hdl = "HDL (mg/dL)",
+  ldl = "LDL (mg/dL)",
+  NonHDL.Cholesterin = "Non-HDL Cholesterol (mg/dL)",
+  cholesterol = "Total Cholesterol (mg/dL)",
+  `got/AST` = "GOT/AST (U/L)",
+  ggt = "GGT (U/L)",
+  NEUTROPHILE = "Neutrophils (xE9/L)",
+  LYMPHOZYTEN = "Lymphocytes (xE9/L)",
+  ptt = "PTT (s)",
+  quick = "Quick",
+  glucose = "Serum Glucose (mg/dL)",
+  uric_acid = "Uric Acid (mg/dL)",
+  leukocytes = "Leukocytes (Tsd./µL)",
+  crp_hs = "C-reactive Protein (mg/L)"
+)
+
+# List 2: Selected parameters for main figure
+selected_parameters <- c("Ketosemia", "glucose", "triglyceride", "ldl_hdl_ratio", 
+                         "uric_acid", "leukocytes", "crp_hs", "inr")
+
+# Parameters that should NOT include D-1 timepoint (none now)
+parameters_exclude_diet <- character(0)
+```
+
+```{r}
+# ============================================================================ #
+# Data preparation
+# ============================================================================ #
+df <- daily_meta %>%
+  select(Timepoint, ID, all_of(main_parameters)) %>%
+  mutate(NLR = NEUTROPHILE / LYMPHOZYTEN) %>%
+  filter(Timepoint %in% c("D-1","D+3", "D+10", "M+1")) %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("D-1","D+3", "D+10", "M+1"))) %>%
+  mutate(ID = factor(ID, levels = unique(ID))) 
+
+df_long <- df %>% 
+  pivot_longer(
+    cols = -c(Timepoint, ID),
+    names_to = "Parameter",
+    values_to = "Value"
+  )
+```
+
+```{r}
+# ============================================================================ #
+# LMM-based p-values for all parameters                   
+# ============================================================================ #
+ref_tp <- "D-1"
+tp_levels <- c("D-1", "D+3", "D+10", "M+1")
+
+df_long2 <- df_long %>%
+  mutate(
+    ID = factor(ID),
+    Timepoint = factor(Timepoint, levels = tp_levels)
+  )
+
+fit_one_param <- function(dat, ref = ref_tp) {
+  dat <- dat %>% filter(!is.na(Value), !is.na(Timepoint), !is.na(ID))
+  if (n_distinct(dat$Timepoint) < 2L) return(NULL)
+  m <- lmer(Value ~ Timepoint + (1 | ID), data = dat, REML = TRUE)
+  em <- emmeans(m, ~ Timepoint)
+  ct <- contrast(em, method = "trt.vs.ctrl", ref = which(levels(dat$Timepoint) == ref))
+  out <- as.data.frame(summary(ct, infer = c(TRUE, TRUE), adjust = "bonferroni")) %>%
+    rename(
+      contrast = contrast,
+      estimate = estimate,
+      SE = SE,
+      df = df,
+      t = t.ratio,
+      p_adj = p.value,
+      conf.low = lower.CL,
+      conf.high = upper.CL
+    )
+  out
+}
+
+pval_lmm <- df_long2 %>%
+  group_by(Parameter) %>%
+  group_modify(~ {
+    res <- fit_one_param(.x, ref = ref_tp)
+    if (is.null(res)) return(tibble())
+    res
+  }) %>%
+  ungroup()
+```
+
+```{r}
+# ============================================================================ #
+# Prepare data for visualization with p-values          
+# ============================================================================ #
+# (A) Parse contrasts into group1/group2
+pval_lmm_plot <- pval_lmm %>%
+  mutate(
+    group2 = str_trim(str_split_fixed(contrast, " - ", 2)[, 1]),
+    group1 = str_trim(str_split_fixed(contrast, " - ", 2)[, 2])
+  )
+
+step_increase <- 0.1
+ymax_df <- df_long2 %>%
+  group_by(Parameter) %>%
+  summarise(ymax = max(Value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(step = step_increase * (abs(ymax) + 1))  # scale step to data magnitude
+
+pval_lmm_plot <- pval_lmm_plot %>%
+  left_join(ymax_df, by = "Parameter") %>%
+  group_by(Parameter) %>%
+  arrange(group2, .by_group = TRUE) %>%
+  mutate(
+    y.position = ymax + row_number() * step
+  ) %>%
+  ungroup()
+
+pval_lmm_plot <- pval_lmm_plot %>%
+  mutate(
+    p.adj = p_adj,
+    p.adj.signif = case_when(
+      is.na(p.adj)        ~ NA_character_,
+      p.adj <= 0.0001     ~ "****",
+      p.adj <= 0.001      ~ "***",
+      p.adj <= 0.01       ~ "**",
+      p.adj <= 0.05       ~ "*",
+      TRUE                ~ "ns"
+    )
+  )
+
+# Data for selected parameters visualization
+tmp_data <- df_long2 %>%
+  filter(Parameter %in% selected_parameters) %>%
+  mutate(Parameter = factor(Parameter, levels = selected_parameters))
+
+tmp_pval <- pval_lmm_plot %>%
+  filter(Parameter %in% selected_parameters) %>%
+  mutate(Parameter = factor(Parameter, levels = selected_parameters))
+```
+
+```{r}
+# Blood parameters visualization (selected subset)
+p_selected_box <- tmp_data %>%
+  ggplot(aes(x = Timepoint, y = Value)) +
+  facet_wrap(~ Parameter, scales = "free_y", ncol = 4, labeller = labeller(Parameter = custom_labels)) +
+  geom_boxplot(width = 0.3, outlier.shape = NA, fill = "grey90") +
+  geom_point(size = 1, aes(color = ID)) +
+  geom_line(alpha = 0.5, linewidth = 0.1, aes(group = ID), linetype = "dashed") +
+  scale_color_manual(values = patient_colors, drop = FALSE) +
+  scale_x_discrete(labels = labels_4timepoint) +
+  labs(x = "Time Point", y = "", color = "Patient ID") +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  stat_pvalue_manual(
+    tmp_pval,
+    label = "p.adj.signif",
+    tip.length = 0.01,
+    size = 3,
+    bracket.size = 0.3,
+    hide.ns = TRUE
+  )
+
+save(p_selected_box, tmp_data, tmp_pval, file = "figures/p_blood_params_selected.RData")
+```
+
+```{r}
+# Summaries and export using unified LMM results
+df_summary <- df_long2 %>%
+  group_by(Timepoint, Parameter) %>%
+  summarise(
+    mean = mean(Value, na.rm = TRUE),
+    sd   = sd(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+df_output <- pval_lmm_plot %>% select(-ymax, -step, -y.position, -p.adj)
+write.xlsx(df_output, file = "figures/pval_clinical_parameters.xlsx")
+write.xlsx(df_summary, file = "figures9/mean_sd_clinical_parameters.xlsx")
+```
