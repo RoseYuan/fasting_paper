@@ -1,5 +1,17 @@
 ---
-title: "Visualization of PCA on blood parameters"
+title: "Visualization of PCA on clinical parameters"
+subtitle: "Baseline and change-score PCA of fasting-related clinical measurements"
+abstract: |
+  This notebook performs two principal component analyses on clinical metadata
+  from the fasting cohort. PCA 1 summarizes between-participant structure in
+  complete baseline D-1 measurements across energy metabolism, liver function,
+  blood-cell, kidney-function, and coagulation parameters. PCA 2 summarizes
+  within-participant clinical changes by analyzing parameter deltas from D-1 to
+  D+10 and from D-1 to M+1. For both analyses, the notebook generates PCA score
+  plots, scree plots, and grouped loading plots; exports supplementary PCA
+  figures as `figures/suppl_pca1.pdf` and `figures/suppl_pca2.pdf`; then
+  combines the PCA score plots with the longitudinal weight and selected
+  clinical-parameter plots to export the manuscript Figure 2 PDF.
 format:
   html:
     theme: sandstone
@@ -26,6 +38,7 @@ library(knitr)
 library(gridExtra)
 library(enrichplot)
 library(patchwork)
+library(tidytable)
 source("utils.R")
 ```
 
@@ -72,7 +85,10 @@ main_parameters <- c(energy_vars, liver_vars, blood_vars, kidney_vars, coagulati
 
 ## PCA 1: All parameters at time point D-1
 
-Analyze clinical parameters (metabolism, liver, kidney function, blood cells) at baseline (D-1).
+Analyze complete clinical parameters at baseline (D-1). This PCA describes
+cross-sectional differences among participants before the fasting intervention,
+using parameter groups for energy metabolism, liver function, blood cells, kidney
+function, and coagulation. Columns with missing values are removed before PCA.
 
 ```{r}
 selected_data <- meta %>% 
@@ -89,7 +105,8 @@ metadata <- selected_data %>% select(ID, Timepoint)
 colnames(mat) <- rownames(metadata)
 
 pca_baseline <- pca(mat, metadata = metadata, removeVar = 0)
-myscreeplot(pca_baseline, components = 1:6)
+p_scree1 <- myscreeplot(pca_baseline, components = 1:6)
+p_scree1
 ```
 
 ```{r pca1-plot, fig.width=20, fig.height=8}
@@ -127,12 +144,44 @@ p1_34 <- biplot(pca_baseline,
   # scale_color_manual(values = patient_colors, drop = FALSE) +
   common_theme
 
-pf1 <- p1_12 + p1_34 + 
+p1_12 + p1_34 + 
   plot_layout(guides = "collect") +
   plot_annotation(title = "PCA Analysis 1: Time Point D-1") &
   theme(
     plot.title = element_text(hjust = 0.5, size = 14, margin = margin(b = -10)),
     plot.margin = margin(t = 15, r = 5, b = -5, l = 10)
+  )
+```
+
+```{r}
+# Scores are samples x PCs
+scores_df <- as.data.frame(pca_baseline$rotated) %>%
+    tibble::rownames_to_column("sample_ID") %>%
+    left_join(
+        pca_baseline$metadata %>% tibble::rownames_to_column("sample_ID"),
+        by = "sample_ID"
+    )
+
+# Check
+stopifnot(all(c("PC1", "PC2") %in% colnames(scores_df)))
+
+pf1 <- ggplot(scores_df, aes(x = PC1, y = PC2)) +
+  geom_point(size = 2, alpha = 0.9, color ="grey40") +
+  labs(
+    title = "PCA Analysis 1: Time Point D-1",
+    x = paste0("PC1, ", round(pca_baseline$variance[1], 1), "% variation"),
+    y = paste0("PC2, ", round(pca_baseline$variance[2], 1), "% variation")
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.2, size = 10, margin = margin(b = 10)),
+    plot.margin = margin(t = 20, r = 0, b = 0, l = 5),
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title = element_text(size = 9),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 9)
   )
 
 pf1
@@ -208,7 +257,7 @@ pf1_loadings <- ggplot(df_loadings, aes(x = Loadings, y = Factors, color = Loadi
     axis.text.x = element_text(size = 8),
     axis.title.x = element_text(size = 12),
     legend.title = element_text(size = 12),
-    plot.margin = margin(t = -10, r = 0, b = 0, l = 0)
+    plot.margin = margin(t = -10, r = 0, b = 10, l = 0)
   ) +
   labs(
     x = "PCA Loadings",
@@ -216,14 +265,27 @@ pf1_loadings <- ggplot(df_loadings, aes(x = Loadings, y = Factors, color = Loadi
     color = "Loadings",
     fill = "Parameters",
     title = ""
-  )
+  ) +
+  scale_y_discrete(labels = var_to_full)
 
 pf1_loadings
 ```
 
+```{r}
+grDevices::cairo_pdf("figures/suppl_pca1.pdf", width=11, height=12)
+plot_grid(p_scree1 + labs(title="") + theme(plot.margin=margin(t=5, r=85, b=15, l=85)),
+          pf1_loadings, 
+          labels=c("a", "b"), label_size=20, ncol=1, rel_heights=c(1,1.2), align="v", axis="tb")
+dev.off()
+```
+
 ## PCA 2: Changes compared to D-1
 
-Analyze parameter changes: Δ[D+10, D-1] and Δ[M+1, D-1].
+Analyze within-participant parameter changes relative to baseline. For each
+clinical parameter, the notebook computes two delta values per participant:
+`D+10 - D-1` and `M+1 - D-1`. The PCA is then run on these change scores to
+summarize coordinated clinical responses during the fasting endpoint and
+one-month follow-up.
 
 ```{r pca2-prepare}
 # Get parameter columns
@@ -273,7 +335,8 @@ metadata <- delta_data %>%
 colnames(mat) <- rownames(metadata)
 
 pca_delta <- pca(mat, metadata = metadata, removeVar = 0)
-myscreeplot(pca_delta, components = 1:6)
+p_scree2 <- myscreeplot(pca_delta, components = 1:6)
+p_scree2
 ```
 
 ```{r pca2-plot, fig.width=20, fig.height=10}
@@ -293,12 +356,13 @@ pf2 <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Time)) +
   scale_color_manual(values = c("ΔD+10" = "#4169E1", "ΔM+1" = "#E35B53")) +
   labs(
     title = "PCA Analysis 2: Δ[D+10, D-1] and Δ[M+1, D-1]",
-    x = paste0("PC1,", round(pca_delta$variance[1], 1), "% variation"),
-    y = paste0("PC2,", round(pca_delta$variance[2], 1), "% variation")
-  ) +
+    x = paste0("PC1, ", round(pca_delta$variance[1], 1), "% variation"),
+    y = paste0("PC2, ", round(pca_delta$variance[2], 1), "% variation")
+  ) + 
+  theme_bw() +
   theme(
     legend.position = "right",
-    plot.title = element_text(hjust = 0.2, size = 11, margin = margin(b = 10)),
+    plot.title = element_text(hjust = 0.2, size = 10, margin = margin(b = 10)),
     plot.margin = margin(t = 20, r = 0, b = 0, l = 5),
     axis.text.x = element_blank(),
     axis.text.y = element_blank(),
@@ -307,7 +371,7 @@ pf2 <- ggplot(scores_df, aes(x = PC1, y = PC2, color = Time)) +
     legend.title = element_text(size = 9)
   )
 
-pf2 + theme(legend.margin = margin(t=0, r=5, b=0, l=-10))
+pf2
 ```
 
 
@@ -315,7 +379,7 @@ pf2 + theme(legend.margin = margin(t=0, r=5, b=0, l=-10))
 # Prepare loadings data with parameter groupings
 df_loadings <- as.data.frame(pca_delta$loadings) %>%
   tibble::rownames_to_column("Factors") %>%
-  select(Factors, tidyselect::any_of(paste0("PC", 1:4))) %>%
+  select(Factors, tidyselect::any_of(paste0("PC", 1:6))) %>%
   pivot_longer(
     cols = starts_with("PC"),
     names_to = "PC",
@@ -367,7 +431,7 @@ background_df <- df_loadings %>%
   )
 
 # Add variance explained to PC labels
-pc_labels <- paste0("PC", 1:4, ": ", round(pca_delta$variance[1:4], 1), "%")
+pc_labels <- paste0("PC", 1:6, ": ", round(pca_delta$variance[1:6], 1), "%")
 df_loadings <- df_loadings %>%
   mutate(PC_labels = pc_labels[as.numeric(sub("PC", "", PC))])
 
@@ -394,10 +458,32 @@ pf3 <- ggplot(df_loadings, aes(x = Loadings, y = Factors, color = Loadings)) +
     axis.text.x = element_text(size = 8),
     axis.title.x = element_text(size = 12),
     legend.title = element_text(size = 12),
-    plot.margin = margin(t = -10, r = 0, b = 0, l = 0)
+    plot.margin = margin(t = -10, r = 0, b = 10, l = 0)
   ) +
-  labs(x = "PCA Loadings", y = "", color = "Loadings", title = "", fill = "Parameters")
+  labs(x = "PCA Loadings", y = "", color = "Loadings", title = "", fill = "Parameters") +
+  scale_y_discrete(labels = var_to_full)
 
 pf3
 ```
 
+```{r}
+grDevices::cairo_pdf("figures/suppl_pca2.pdf", width=11, height=12)
+plot_grid(p_scree2 + labs(title="") + theme(plot.margin=margin(t=5, r=85, b=15, l=85)),
+          pf3, 
+          labels=c("a", "b"), label_size=20, ncol=1, rel_heights=c(1,1.2), align="v", axis="tb")
+dev.off()
+```
+
+# Figure 2
+```{r}
+load("figures/p_weight_trends.RData")
+load("figures/p_blood_params_selected.RData")
+```
+
+```{r}
+p_up <- plot_grid(p_weight_trend, pf1, pf2, labels=c("a", "b", "c"), label_size=20, ncol=3, rel_widths=c(1.5,1,1.3), align="h", axis="tb")
+
+grDevices::cairo_pdf("figures/Fig2.pdf", width=12, height=8)
+plot_grid(p_up, p_selected_box, labels=c("", "d"), label_size=20, ncol=1, rel_heights=c(1,1.2), align="v", axis="tb")
+dev.off()
+```
