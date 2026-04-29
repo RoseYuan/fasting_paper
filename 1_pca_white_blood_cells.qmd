@@ -1,5 +1,14 @@
 ---
-title: "PCA of blood cell parameters"
+title: "PCA of white blood cell parameters"
+subtitle: "Supplementary analysis of leukocyte subset composition across fasting and follow-up timepoints"
+abstract: |
+  This notebook analyzes longitudinal white blood cell composition in the fasting
+  cohort using the clinical metadata. It selects the percentage measurements for
+  neutrophils, monocytes, lymphocytes, eosinophils, and basophils at D-1, D+3,
+  D+10, and M+1, excludes the prespecified outlier participant, and runs PCA to
+  summarize how leukocyte subset proportions vary across timepoints. Outputs are
+  saved as an RDS PCA object and a supplementary figure with the scree plot and
+  PC1/PC2 loadings.
 format:
   html:
     theme: sandstone
@@ -29,7 +38,7 @@ source("utils.R")
 IN_META_3TP   <- "data/meta_3timepoints.csv"
 IN_META_DAILY <- "data/meta_daily.csv"
 
-OUTDIR_FIG <- "=figures"
+OUTDIR_FIG <- "figures"
 dir.create(OUTDIR_FIG, recursive = TRUE, showWarnings = FALSE)
 
 TP_KEEP <- c("D-1", "D+3", "D+10", "M+1")
@@ -40,7 +49,9 @@ CELL_REGEX <- "cytes|_abs|ZYTEN|hemoglobin|MCH|MCV|neutrophile|baso|eosinophile|
 # load data
 daily_meta <- read.csv(IN_META_DAILY, stringsAsFactors = FALSE)
 daily_meta$ID <- as.factor(daily_meta$ID)
-cell_source <- daily_meta %>% filter(Timepoint %in% TP_KEEP)
+cell_source <- daily_meta %>% 
+  filter(Timepoint %in% TP_KEEP) %>%
+  filter(ID!=18)
 
 col_cell <- cell_source %>%
   select(matches(CELL_REGEX)) %>%
@@ -60,6 +71,11 @@ cell_data <- cell_source %>%
 # Drop features with ANY missing values 
 keep_features <- colnames(cell_data)[-(1:2)][colSums(is.na(cell_data[, -(1:2)])) == 0]
 cell_data <- cell_data %>% select(ID, Timepoint, all_of(keep_features))
+```
+
+```{r}
+# select only white cell type percentages
+cell_data <- cell_data %>% select(ID, Timepoint, NEUTROPHILE, MONOZYTEN, LYMPHOZYTEN, EOSINOPHILE, BASO)
 ```
 
 ```{r}
@@ -83,7 +99,7 @@ colnames(mat) <- metadata$sample_id
 
 # Run PCA
 p <- pca(mat, metadata = metadata, removeVar = 0)
-saveRDS(p, file = "data/pca_blood_cells.rds")
+saveRDS(p, file = "data/pca_white_blood_cells.rds")
 ```
 
 ```{r}
@@ -119,19 +135,14 @@ p_loading <- ggplot(df_loadings, aes(x = Loadings, y = Factors, color = Loadings
   theme(axis.text.y = element_text(face = "bold"),
         strip.text = element_text(size = 14, face = "bold"),
         legend.position = "right") +
-  labs(x = "PCA Loadings", y = "Factors", color = "Loadings", title="")
+  labs(x = "PCA Loadings", y = "Factors", color = "Loadings", title="") +
+  scale_y_discrete(labels = var_to_full)
+
+p_loading
 ```
 
 ```{r}
-grDevices::cairo_pdf("figures/suppl_pca_blood_cell.pdf", width=10, height=5)
-plot_grid(p_scree + labs(title=""), 
-          p_scores, 
-          labels=c("a", "b"), label_size=20, ncol=2, rel_widths=c(1,1.5), align="h", axis="tb")
-dev.off()
-```
-
-```{r}
-grDevices::cairo_pdf("figures/suppl_pca_blood_cell_2.pdf", width=10, height=5)
+grDevices::cairo_pdf("figures/suppl_pca_white_blood_cell.pdf", width=10, height=5)
 plot_grid(p_scree + labs(title=""), 
           p_loading, 
           labels=c("a", "b"), label_size=20, ncol=2, rel_widths=c(1,1.5), align="h", axis="tb")
@@ -141,4 +152,3 @@ dev.off()
 ```{r}
 sessionInfo()
 ```
-
