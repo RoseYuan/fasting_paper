@@ -1,5 +1,14 @@
 ---
-title: "Data Preparation"
+title: "Data preparation"
+subtitle: "Clock-oriented preprocessing of complete methylation beta values"
+abstract: |
+  This notebook prepares the less stringently filtered methylation beta matrix
+  for downstream epigenetic clock prediction. It loads the complete Sesame beta
+  matrix and three-timepoint metadata, aligns phenotype rows to beta-matrix
+  columns, removes all-NA probes, imputes missing beta values with ChAMP KNN
+  imputation, applies BMIQ normalization for EPIC arrays, and uses ComBat to
+  correct scan-date batch effects while preserving the Timepoint variable. The
+  processed beta matrix is saved as `data/betas_complete_processed.RDS`.
 format:
   html:
     theme: sandstone
@@ -91,4 +100,3 @@ the betas with stringent probe filtering & masking steps and normalization using
 
 For newer clock prediction, use this less stringently filtered betas with imputation, BMIQ 
 normalization and batch correction.
-
