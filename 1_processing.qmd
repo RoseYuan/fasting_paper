@@ -1,5 +1,15 @@
 ---
-title: "Processing & Quality control"
+title: "Processing and quality control"
+subtitle: "Illumina EPIC methylation array preprocessing with Meffil and Sesame"
+abstract: |
+  This notebook processes raw Illumina EPIC IDAT files for the fasting cohort.
+  It builds the sample sheet, performs sample-level and probe-level quality
+  control with Meffil, exports QC summaries and bad-probe lists, then applies
+  Sesame preprocessing steps including recommended masking, Infinium-I channel
+  inference, nonlinear dye-bias correction, pOOBAH detection masking, and Noob
+  background correction. The final outputs include preprocessed Sesame objects,
+  beta-value matrices with and without complete probe masking, QC tables, and
+  diagnostic beta-distribution plots for downstream methylation analyses.
 author: "Siyuan Luo"
 date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
 format:
@@ -366,4 +376,3 @@ ggplot(density_df, aes_string(x = "x", y = "y",
 ```{r}
 sessionInfo()
 ```
-
