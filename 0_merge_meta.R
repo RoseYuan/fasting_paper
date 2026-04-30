@@ -1,9 +1,30 @@
 # ==============================================================================
-# Load and merge metadata (fasting study)
-# Siyuan luo, 2026.01.13
-# Output:
-#   - publication/data/merged_3timepoints_meta.csv
-#   - publication/data/merged_daily_meta.csv
+# Merge Fasting Study Metadata
+# ==============================================================================
+
+# This script builds the main metadata tables used throughout the fasting
+# methylation and clinical analyses. It combines the IDAT sample sheet with
+# daily clinical metadata, the three-timepoint clinical metadata export, and the
+# AGE/glycation table. Timepoint labels are harmonized with project utilities,
+# overlapping variables from the daily and three-timepoint sources are
+# reconciled, and array/sample-sheet fields are retained for downstream
+# methylation QC and batch modeling.
+#
+# Derived variables include:
+#   - ID_Patient identifiers in the B__### format
+#   - QC outlier flag for sample 4033964733
+#   - BMI, baseline BMI, and baseline BMI category
+#   - BMR estimates
+#   - per-participant minimum weight/BMI/BMR2 and maximum loss/regain summaries
+#
+# Outputs:
+#   - publication/data/meta_3timepoints.csv: merged D-1, D+10, and M+1 metadata
+#     aligned to methylation sample-sheet fields and AGE/glycation variables.
+#   - publication/data/meta_daily.csv: daily clinical metadata with harmonized
+#     timepoints, BMI/BMR variables, and baseline BMI categories.
+#
+# The final block treats the daily table as a superset and reports disagreement
+# or missingness for shared columns at the three methylation timepoints.
 # ==============================================================================
 
 suppressPackageStartupMessages({
