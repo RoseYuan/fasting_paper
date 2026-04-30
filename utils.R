@@ -2,6 +2,13 @@
 # Meta data processing
 # -------------------------------
 
+#' Categorize body mass index.
+#'
+#' Converts numeric BMI values into the project BMI categories used in metadata
+#' and baseline plots.
+#'
+#' @param BMI Numeric vector of BMI values.
+#' @return Character vector with BMI categories, or `NA` for missing BMI.
 BMI_category <- function(BMI) {
   dplyr::case_when(
     is.na(BMI)            ~ NA_character_,
@@ -13,7 +20,16 @@ BMI_category <- function(BMI) {
   )
 }
 
-# Oxford equations (BMR in MJ/day)
+#' Estimate basal metabolic rate with Oxford weight-only equations.
+#'
+#' Uses sex- and age-specific Oxford equations based on body weight. The output
+#' is in MJ/day.
+#'
+#' @param weight Numeric body weight in kg.
+#' @param age Numeric age in years.
+#' @param sex Character scalar, either `"male"` or `"female"`.
+#' @return Numeric BMR estimate in MJ/day, or `NA_real_` when inputs are missing
+#'   or sex is not recognized.
 BMR_Oxford <- function(weight, age, sex) {
   if (is.na(weight) || is.na(age) || is.na(sex)) return(NA_real_)
   if (sex == "male") {
@@ -36,6 +52,17 @@ BMR_Oxford <- function(weight, age, sex) {
   NA_real_
 }
 
+#' Estimate basal metabolic rate with Oxford weight-height equations.
+#'
+#' Uses sex- and age-specific Oxford equations based on body weight and height.
+#' The output is in MJ/day.
+#'
+#' @param weight Numeric body weight in kg.
+#' @param height Numeric height in meters.
+#' @param age Numeric age in years.
+#' @param sex Character scalar, either `"male"` or `"female"`.
+#' @return Numeric BMR estimate in MJ/day, or `NA_real_` when inputs are missing
+#'   or sex is not recognized.
 BMR_Oxford2 <- function(weight, height, age, sex) {
   # height in meters
   if (is.na(weight) || is.na(height) || is.na(age) || is.na(sex)) return(NA_real_)
@@ -57,6 +84,21 @@ BMR_Oxford2 <- function(weight, height, age, sex) {
   NA_real_
 }
 
+#' Calculate per-participant minimum value, loss, and regain summaries.
+#'
+#' Works on a wide table containing one row per participant and repeated
+#' timepoint-specific columns such as `weight_D-2`, `weight_D+10`, and
+#' `weight_M+1`. The function finds the minimum observed value across columns
+#' matching `prefix`, calculates maximum loss from the starting column, and
+#' calculates regain from the minimum to the follow-up column.
+#'
+#' @param wide_df Data frame containing an ID column and prefixed value columns.
+#' @param prefix Column prefix to summarize, for example `"weight"` or `"BMI"`.
+#' @param starting_col Baseline/start column used to calculate loss.
+#' @param followup_col Follow-up column used to calculate regain.
+#' @return `wide_df` with additional columns named `min_<prefix>`,
+#'   `max_<prefix>_loss`, `max_<prefix>_loss_perc`,
+#'   `max_<prefix>_regain`, and `max_<prefix>_regain_perc`.
 calc_min_and_changes <- function(wide_df, prefix, starting_col, followup_col) {
   # wide_df: ID + columns like weight_Arrival, weight_FUP1...
   value_cols <- grep(paste0("^", prefix, "_"), names(wide_df), value = TRUE)
@@ -101,6 +143,16 @@ calc_min_and_changes <- function(wide_df, prefix, starting_col, followup_col) {
     )
 }
 
+#' Harmonize study timepoint labels.
+#'
+#' Converts heterogeneous timepoint labels from source metadata tables into the
+#' project standard: `D-2`, `D-1`, `D0`, fasting days `D+1` to `D+12`,
+#' reintroduction days `D+13` to `D+17`, and follow-up `M+1`.
+#'
+#' @param x Vector of raw timepoint labels.
+#' @param unknown How to handle unmapped labels: `"keep"` preserves the original
+#'   value with a warning, `"na"` replaces with `NA`, and `"error"` stops.
+#' @return Character vector of harmonized timepoint labels.
 harmonise_timepoint <- function(x, unknown = c("keep", "na", "error")) {
   unknown <- match.arg(unknown)
   
@@ -153,6 +205,19 @@ harmonise_timepoint <- function(x, unknown = c("keep", "na", "error")) {
   out
 }
 
+#' Reconcile paired `.x` and `.y` columns after merging metadata tables.
+#'
+#' Compares two vectors representing the same variable from different sources.
+#' Numeric-like values are compared within a tolerance; non-numeric values must
+#' match exactly when both sources are non-missing. Missing values are filled
+#' from the other source.
+#'
+#' @param x First source vector.
+#' @param y Second source vector.
+#' @param name Variable name used in conflict error messages.
+#' @param tol Numeric tolerance for numeric-like comparisons.
+#' @return A single reconciled vector, numeric when both inputs are numeric-like
+#'   and character otherwise.
 resolve_xy <- function(x, y, name = "var", tol = 1e-6) {
   # 1) Convert both to character, normalize common "NA" representations
   x_chr <- trimws(as.character(x))
@@ -189,6 +254,17 @@ resolve_xy <- function(x, y, name = "var", tol = 1e-6) {
   dplyr::coalesce(x_chr, y_chr)
 }
 
+#' Summarize agreement for a shared metadata column.
+#'
+#' Used after joining the three-timepoint metadata table with the daily metadata
+#' table. The input must contain paired columns named `<col>.meta` and
+#' `<col>.daily`.
+#'
+#' @param df Joined metadata data frame containing `.meta` and `.daily` columns.
+#' @param col Base column name to compare.
+#' @param tol Numeric tolerance for numeric-like comparisons.
+#' @return A one-row tibble with the column name, number of values present in
+#'   `.meta` but missing in `.daily`, and number of disagreements.
 check_shared_column <- function(df, col, tol = 1e-6) {
   a <- df[[paste0(col, ".meta")]]
   b <- df[[paste0(col, ".daily")]]
@@ -220,6 +296,15 @@ check_shared_column <- function(df, col, tol = 1e-6) {
   )
 }
 
+#' Collapse duplicated merge columns into one column per variable.
+#'
+#' Removes repeated `.x`/`.y` suffixes introduced by joins, checks duplicated
+#' columns for row-level inconsistencies, and coalesces non-missing values into a
+#' single output column.
+#'
+#' @param df Data frame containing a `Sample` column and possibly duplicated
+#'   merge columns such as `Age.x`, `Age.y`, or `Age.x.x`.
+#' @return Data frame with `Sample` plus one collapsed column per base variable.
 collapse_duplicates <- function(df) {
   base_names <- names(df) %>%
     str_replace("\\.[xy](\\.[xy])*$", "") %>%  # remove .x, .y, .x.x, etc
@@ -249,6 +334,91 @@ collapse_duplicates <- function(df) {
 }
 
 # -------------------------------
+# Name mapping
+# -------------------------------
+var_to_full <- c(
+  BASO = "Basophils (%)",
+  BASO_abs = "Absolute basophil count (ABC)",
+  Bilirubin = "Total bilirubin",
+  EOSINOPHILE = "Eosinophils (%)",
+  EOSINOPHILE_abs = "Absolute eosinophil count (AEC)",
+  Erythrozytenverteilungsbreite = "Red cell distribution width (RDW)",
+  GFR = "Estimated glomerular filtration rate (eGFR)",
+  Homa = "HOMA-IR",
+  `Hämoglobingehalt der Retis` = "Reticulocyte hemoglobin content (Ret-He)",
+  Insulin = "Insulin",
+  Ketosemia = "Blood ketone concentration (ketonemia)",
+  LYMPHOZYTEN = "Lymphocytes (%)",
+  Lymphozyten_absolut = "Absolute lymphocyte count (ALC)",
+  MONOZYTEN = "Monocytes (%)",
+  MONOZYTEN_abs = "Absolute monocyte count (AMC)",
+  NEUTROPHILE = "Neutrophils (%)",
+  NLR = "Neutrophil-to-lymphocyte ratio (NLR)",
+  Neutrophile_absolut = "Absolute neutrophil count (ANC)",
+  NonHDL.Cholesterin = "Non-HDL cholesterol (non-HDL-C)",
+  ProMyeloMetamyelozyten = "Pro- and metamyelocytes (%)",
+  ProMyeloMetamyelozyten_abs = "Absolute pro- and metamyelocyte count",
+  Retikulozyten = "Reticulocytes (%)",
+  `Retikulozyten ProduktionsIndex` = "Reticulocyte production index (RPI)",
+  `Retikulozyten absolut` = "Absolute reticulocyte count",
+  alk_phosphatase = "Alkaline phosphatase (ALP)",
+  cholesterol = "Total cholesterol",
+  creatinine = "Creatinine",
+  crp_hs = "High-sensitivity C-reactive protein (hsCRP)",
+  dbp = "Diastolic blood pressure (DBP)",
+  erythrocytes = "Red blood cell count (RBC)",
+  ggt = "Gamma-glutamyl transferase (GGT)",
+  glucose = "Glucose",
+  glykohemoglobin = "Glycated hemoglobin (HbA1c)",
+  `got/AST` = "Aspartate aminotransferase (AST)",
+  `gpt/ALT` = "Alanine aminotransferase (ALT)",
+  hdl = "High-density lipoprotein cholesterol (HDL-C)",
+  hematocrit = "Hematocrit (Hct)",
+  hemoglobin = "Hemoglobin (Hb)",
+  inr = "International normalized ratio (INR)",
+  ldl = "Low-density lipoprotein cholesterol (LDL-C)",
+  ldl_hdl_ratio = "LDL-to-HDL cholesterol ratio",
+  leukocytes = "White blood cell count (WBC)",
+  mch = "Mean corpuscular hemoglobin (MCH)",
+  mchc = "Mean corpuscular hemoglobin concentration (MCHC)",
+  mcv = "Mean corpuscular volume (MCV)",
+  ptt = "Partial thromboplastin time (PTT)",
+  pulse = "Heart rate",
+  quick = "Prothrombin time (Quick)",
+  sbp = "Systolic blood pressure (SBP)",
+  thrombocytes = "Platelet count (PLT)",
+  triglyceride = "Triglycerides",
+  urea = "Urea",
+  uric_acid = "Uric acid"
+)
+
+var_to_abbr <- c(
+  hemoglobin = "Hb",
+  hematocrit = "Hct",
+  mcv = "MCV",
+  mch = "MCH",
+  mchc = "MCHC",
+  Erythrozytenverteilungsbreite = "RDW",
+  leukocytes = "WBC",
+  erythrocytes = "RBC",
+  thrombocytes = "PLT",
+  crp_hs = "hsCRP",
+  inr = "INR",
+  ptt = "PTT",
+  `got/AST` = "AST",
+  `gpt/ALT` = "ALT",
+  ggt = "GGT",
+  alk_phosphatase = "ALP",
+  hdl = "HDL-C",
+  ldl = "LDL-C",
+  NLR = "NLR",
+  glykohemoglobin = "HbA1c",
+  GFR = "eGFR"
+)
+
+var_to_short <- var_to_full
+var_to_short[names(var_to_abbr)] <- var_to_abbr
+# -------------------------------
 # Visualization
 # -------------------------------
 
@@ -260,6 +430,16 @@ suppressPackageStartupMessages({
 library(PCAtools)
 })
 
+#' Create a scree plot with variance and cumulative-variance labels.
+#'
+#' Wraps `PCAtools::screeplot()` and adds text labels for per-component variance
+#' explained and cumulative variance explained.
+#'
+#' @param pcaobj PCAtools PCA object, typically returned by `PCAtools::pca()`.
+#' @param components Components to display. Defaults to all components returned
+#'   by `PCAtools::getComponents(pcaobj)`.
+#' @param ... Additional arguments passed to `PCAtools::screeplot()`.
+#' @return A ggplot object.
 myscreeplot <- function(pcaobj, components=getComponents(pcaobj), ...){
   plotobj <- data.frame(components, pcaobj$variance[components])
   colnames(plotobj) <- c('PC', 'Variance')
@@ -286,7 +466,13 @@ myscreeplot <- function(pcaobj, components=getComponents(pcaobj), ...){
 }
 
 
-# helper: stable palette per ID
+#' Create a stable qualitative color palette for participant IDs.
+#'
+#' Builds a Polychrome palette and names each color by the corresponding ID so
+#' participant colors remain stable across plots.
+#'
+#' @param ids Vector of participant IDs.
+#' @return Named character vector of hex colors.
 make_id_palette <- function(ids) {
   ids <- sort(unique(ids))
   seed <- c("#ff0000", "#00ff00", "#0000ff")
