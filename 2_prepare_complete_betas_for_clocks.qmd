@@ -1,0 +1,102 @@
+---
+title: "Data preparation"
+subtitle: "Clock-oriented preprocessing of complete methylation beta values"
+abstract: |
+  This notebook prepares the less stringently filtered methylation beta matrix
+  for downstream epigenetic clock prediction. It loads the complete Sesame beta
+  matrix and three-timepoint metadata, aligns phenotype rows to beta-matrix
+  columns, removes all-NA probes, imputes missing beta values with ChAMP KNN
+  imputation, applies BMIQ normalization for EPIC arrays, and uses ComBat to
+  correct scan-date batch effects while preserving the Timepoint variable. The
+  processed beta matrix is saved as `data/betas_complete_processed.RDS`.
+format:
+  html:
+    theme: sandstone
+    embed-resources: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      class.output="bg-light")
+```
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+library(readxl)
+library(readr)
+library(ChAMP)
+```
+
+```{r}
+betas <- readRDS("data/betas_complete.RDS")
+meta <- read_csv("data/meta_3timepoints.csv")
+pheno <- meta[,c("Sample","Sample_Name", "Sample_Plate", "ID_Patient", "AMP_Plate", "SentrixBarcode_A", "SentrixPosition_A", "Date_Scan", "Gender", "Timepoint")]
+pheno <- pheno %>% filter(!is.na(Sample))
+rownames(pheno) <- pheno$Sample
+pheno <- as.data.frame(pheno[colnames(betas),])
+```
+
+```{r}
+dim(betas)
+dim(pheno)
+head(pheno)
+```
+
+```{r}
+# remove empty rows
+row_names_with_only_na <- rownames(betas)[apply(betas, 1, function(x) all(is.na(x)))]
+betas <- betas[!rownames(betas) %in% row_names_with_only_na, ]
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# impute missing values using KNN
+imputed_betas <- champ.impute(beta=betas, pd=NULL, SampleCutoff=0.15)
+```
+
+```{r}
+# BMIQ normalization
+densityPlot(imputed_betas, sampGroups=pheno$Date_Scan,
+            main=paste0("Density plot of beta values before BMIQ normalization"),
+            xlab="Beta", legend=FALSE)
+
+bmiq_betas <- champ.norm(beta=imputed_betas,
+                        rgSet=NULL,
+                        mset=NULL,
+                        resultsDir="./CHAMP_Normalization/",
+                        method="BMIQ",
+                        plotBMIQ=TRUE,
+                        arraytype="EPIC",
+                        cores=10)
+
+densityPlot(bmiq_betas, sampGroups=pheno$Date_Scan,
+            main=paste0("Density plot of beta values after BMIQ normalization"),
+            xlab="Beta", legend=FALSE)
+```
+
+```{r}
+# batch correction
+pheno <- pheno[pheno$Sample %in% colnames(bmiq_betas), ]
+beta_corrected <- champ.runCombat(beta=bmiq_betas,
+                                            pd=pheno,
+                                            variablename="Timepoint",
+                                            batchname=c("Date_Scan"))
+
+densityPlot(beta_corrected, sampGroups=pheno$Date_Scan,
+            main=paste0("Density plot of beta values after batch correction"),
+            xlab="Beta", legend=FALSE)
+
+dim(beta_corrected)
+```
+
+```{r}
+saveRDS(beta_corrected, "data/betas_complete_processed.RDS")
+```
+
+
+Note that for differential methylation analysis and old clock prediction, use 
+the betas with stringent probe filtering & masking steps and normalization using SESAME. 
+
+For newer clock prediction, use this less stringently filtered betas with imputation, BMIQ 
+normalization and batch correction.
