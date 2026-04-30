@@ -1,4 +1,31 @@
 # ============================================================================ #
+# SystemsAge and Causal Epigenetic Clock Prediction
+# ============================================================================ #
+
+# This script calculates additional DNA methylation age measures that are not
+# produced by the classic-clock or PC-clock scripts. It uses the complete
+# processed beta matrix from 2_prepare_complete_betas_for_clocks.qmd, transposes
+# it to samples x CpGs, and applies CpG-imputation resources required by the
+# SystemsAge and methylCIPHER clock implementations.
+#
+# Calculated outputs:
+#   - SystemsAge outputs from `calcSystemsAge_cstm()`, including the renamed
+#     chronological-age prediction column `SystemsChronAge_pred`
+#   - AdaptAge from methylCIPHER::calcAdaptAge()
+#   - DamAge from methylCIPHER::calcDamAge()
+#   - CausAge from calcCausAge()
+#
+# Inputs:
+#   - data/betas_complete_processed.RDS
+#   - data/imputeMissingCpGs_SystemsClock.RDS
+#   - data/SystemsAge_data.RData
+#   - ~/public/SiyuanLuo/projects/LongAge/R/SystemsAge.R
+#
+# Output:
+#   - data/OtherClocks.csv: SystemsAge, SystemsChronAge_pred, AdaptAge, DamAge,
+#     and CausAge predictions for each sample.
+
+# ============================================================================ #
 # File Paths
 # ============================================================================ #
 
