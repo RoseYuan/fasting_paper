@@ -1,4 +1,31 @@
 # ============================================================================ #
+# Classic Epigenetic Clock Prediction
+# ============================================================================ #
+
+# This script predicts classical DNA methylation clock values for the fasting
+# cohort using batch-corrected, filtered beta matrices prepared in
+# 2_qc_and_prepare_filtered_betas.qmd. It applies four external clock models
+# (Horvath 353, Hannum, SkinBlood, and PhenoAge) through sesame::predictAge(),
+# and computes DunedinPACE using DunedinPACE::PACEProjector().
+#
+# The probe-prioritized corrected beta matrix is used for the main prediction
+# set because it preserves more CpGs for clock models. One sample
+# (206467110003_R08C01) was excluded from that matrix during probe-prioritized
+# filtering, so it is predicted separately from the sample-prioritized corrected
+# matrix. For each clock, the script records both the predicted value and the
+# number of model CpGs available in the beta matrix.
+#
+# Inputs:
+#   - data/cleaned_beta_p_corrected.RDS: probe-prioritized corrected beta matrix
+#   - data/cleaned_beta_s_corrected.RDS: sample-prioritized corrected beta matrix
+#   - ../anno/Clock_*.rds: external classical clock model objects
+#
+# Output:
+#   - data/ClassicClocks.csv: one row per sample with predicted clock values
+#     and available-CpG counts for Horvath, Hannum, SkinBlood, PhenoAge, and
+#     DunedinPACE.
+
+# ============================================================================ #
 # File Paths
 # ============================================================================ #
 
