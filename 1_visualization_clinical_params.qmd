@@ -7,8 +7,8 @@ abstract: |
   cross-sectional visualization of D-1 BMI by age, sex, and BMI category. The
   longitudinal weight plot uses a linear mixed model with a spline term for
   time and participant-specific random intercepts to estimate the population
-  weight trajectory across fasting and refeeding. Selected metabolic, renal,
-  inflammatory, coagulation, vital-sign, and blood-cell parameters are then
+  weight trajectory across fasting and food reintroduction. Selected metabolic, 
+  renal, inflammatory, coagulation, vital-sign, and blood-cell parameters are then
   summarized at D-1, D+3, D+10, and M+1; for each parameter, a separate linear
   mixed model compares other three timepoints with baseline and exports adjusted
   p-values, and mean/SD summary tables. A specified subset of these variables 
@@ -55,7 +55,7 @@ labels_3timepoint <- c("D-1", "D+10", "M+1")
 This section contains two different visual summaries:
 
 * The longitudinal weight plot models repeated weight measurements across the
-  fasting and refeeding period. The fitted model is
+  fasting and food reintroduction period. The fitted model is
   `weight ~ ns(numeric_timepoint, df = 3) + (1 | ID)`, where the natural spline
   captures the nonlinear time trend and `(1 | ID)` accounts for repeated
   measurements from the same participant.
@@ -95,7 +95,7 @@ phase_df <- bind_rows(
     day_min = 1, day_max = 12
   ),
   tibble(
-    phase = "Refeeding",
+    phase = "Food\nreintroduction",
     day_min = 13, day_max = 16
   )
 ) %>%
@@ -128,7 +128,7 @@ p_weight_trend <-
     inherit.aes = FALSE,
     alpha = 0.2
   ) +
-  scale_fill_manual(values = c(Fasting = "grey20", Refeeding = "grey60"), guide = "none") +
+  scale_fill_manual(values = c(Fasting = "grey20", "Food\nreintroduction" = "grey60"), guide = "none") +
   annotate(
     "text",
     x = phase_labels$x,
