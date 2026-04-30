@@ -1,6 +1,28 @@
 # ============================================================================ #
 # Merge Different Epigenetic Clocks into One File
 # ============================================================================ #
+
+# This script combines all epigenetic clock prediction outputs into a single
+# sample-level table for downstream visualization and association analysis. It
+# merges classical clocks, GrimAge v1, GrimAge v2, PC clocks, SystemsAge, and
+# causal-age clocks by `Sample`.
+#
+# GrimAge v1 and v2 contain overlapping component names, so this script prefixes
+# shared component columns with `GrimAge` or `GrimAge2` before merging. After all
+# clock tables are joined, duplicate columns created by overlapping source files
+# are reconciled with `collapse_duplicates()` from `utils.R`.
+#
+# Inputs:
+#   - data/ClassicClocks.csv
+#   - data/DNAmGrimAgeOutput.csv
+#   - data/DNAmGrimAgev2Output.csv
+#   - data/PCClocks.csv
+#   - data/OtherClocks.csv
+#
+# Output:
+#   - data/AllClocks_Merged.csv: one merged table containing all clock
+#     predictions and clock components available for each shared sample.
+
 # File Paths
 # ============================================================================ #
 FILE_CASSIC_CLOCKS <- "data/ClassicClocks.csv"
