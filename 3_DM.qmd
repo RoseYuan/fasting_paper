@@ -1,5 +1,21 @@
 ---
 title: "Differential methylation analysis"
+subtitle: "Longitudinal limma models for fasting-associated methylation changes"
+abstract: |
+  This notebook tests differential DNA methylation across the fasting study
+  timepoints D-1, D+10, and M+1 using filtered, uncorrected beta matrices from
+  `2_qc_and_prepare_filtered_betas.qmd`. Beta values are transformed to
+  M-values for limma modeling, repeated measurements from the same participant
+  are handled with `duplicateCorrelation`, and scan-date batch effects are
+  controlled by including `Date_Scan_recode` in the design matrix rather than by
+  using pre-corrected beta values. The primary model compares timepoints while
+  adjusting for age and sex; additional models evaluate adjustment for blood
+  cell composition, baseline BMI, and Timepoint x baseline-BMI interactions.
+  The notebook saves fitted model objects, compares DMP overlap across models,
+  estimates covariate-adjusted delta-beta effect sizes, runs GO and KEGG
+  enrichment with `gometh`, performs DMRcate region analysis, and generates
+  manuscript-ready Manhattan, volcano, genomic-feature, and CpG-context
+  visualizations.
 format:
   html:
     theme: sandstone
@@ -16,6 +32,7 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE,
 
 ```{r, results=FALSE, message=FALSE, warning=FALSE}
 library(ggplot2)
+library(ggrastr)
 library(tidyr)
 library(cowplot)
 library(dplyr)
@@ -37,7 +54,7 @@ theme_set(theme_minimal())
 ```
 
 ```{r, results=FALSE, message=FALSE, warning=FALSE}
-proj_dir <- "~/public/SiyuanLuo/projects/fasting_clinics/publication"
+proj_dir <- "~/public/SiyuanLuo/projects/fasting_ms"
 setwd(proj_dir)
 betass <- readRDS("./data/cleaned_beta_s.RDS")
 betasp <- readRDS("./data/cleaned_beta_p.RDS")
@@ -450,7 +467,7 @@ saveRDS(fit2, file="./data/fit_model3_interaction.RDS")
 ```{r}
 # model 1
 design <- model.matrix(~ 0 + Timepoint + Date_Scan_recode + age + sex, data = meta)
-corfit <- readRDS(file="corfit_design1_rm10_2_14.RDS")
+corfit <- readRDS(file="corfit_design1_rm10.RDS")
 fit <- lmFit(M_values, design, block=meta$ID_Patient, correlation = corfit$consensus)
 contrasts <- makeContrasts(
   AFTER_vs_FUP1 = TimepointAFTER - TimepointFUP1,
@@ -460,52 +477,135 @@ fit2 <- contrasts.fit(fit, contrasts)
 fit2 <- eBayes(fit2)
 
 # Extract results for each contrast
-results_AFTER_vs_FUP1 <- topTable(fit2, coef = "AFTER_vs_FUP1", number = Inf)
+results_BEFORE_vs_FUP1 <- topTable(fit2, coef = "BEFORE_vs_FUP1", number = Inf)
 summary(decideTests(fit2, adjust.method="fdr"))
 ```
 
 ```{r}
 p_th <- 0.05
 lfc_th <- 0
-sigCpGsModel1 <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th,])
-dm <- list(model1_up = rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & results_AFTER_vs_FUP1$logFC> lfc_th,]),
-           model1_down = rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & results_AFTER_vs_FUP1$logFC< -lfc_th,]))
+```
+
+```{r}
+sigCpGsModel1 <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th,])
+dm <- list(model1_up = rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th & results_BEFORE_vs_FUP1$logFC> lfc_th,]),
+           model1_down = rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th & results_BEFORE_vs_FUP1$logFC< -lfc_th,]))
 ```
 
 ```{r}
 # model 2
 design <- model.matrix(~ 0 + Timepoint + Date_Scan_recode + age + sex + NEUTROPHILE + LYMPHOZYTEN, data = meta)
-corfit_file <- paste0("corfit_", "NEUTROPHILE_LYMPHOZYTEN", ".RDS")
+corfit_file <- paste0("data/corfit_", "NEUTROPHILE_LYMPHOZYTEN", ".RDS")
 if (!file.exists(corfit_file)) {
   corfit <- duplicateCorrelation(M_values, design, block = meta$ID_Patient)
   saveRDS(corfit, file = corfit_file)
 }
 corfit <- readRDS(corfit_file)
-fit <- lmFit(M_values, design, block=meta$ID_Patient, correlation = corfit$consensus)
+fit <- lmFit(M_values, design, block=meta$ID, correlation = corfit$consensus)
 contrasts <- makeContrasts(
   BEFORE_vs_AFTER = TimepointBEFORE - TimepointAFTER,
   BEFORE_vs_FUP1 = TimepointBEFORE - TimepointFUP1,
   AFTER_vs_FUP1 = TimepointAFTER - TimepointFUP1,
-  NEUTROPHILE = NEUTROPHILE,
-  LYMPHOZYTEN = LYMPHOZYTEN,
   levels = design
 )
 fit2 <- contrasts.fit(fit, contrasts)
 fit2 <- eBayes(fit2)
 
+
 # Extract results for each contrast
 results_BEFORE_vs_AFTER <- topTable(fit2, coef = "BEFORE_vs_AFTER", number = Inf)
 results_BEFORE_vs_FUP1 <- topTable(fit2, coef = "BEFORE_vs_FUP1", number = Inf)
 results_AFTER_vs_FUP1 <- topTable(fit2, coef = "AFTER_vs_FUP1", number = Inf)
-results_NEUTROPHILE/LYMPHOZYTEN <- topTable(fit2, coef = "NEUTROPHILE/LYMPHOZYTEN", number = Inf)
+
+fit_cov <- eBayes(fit)
+results_NEUTROPHILE <- topTable(fit_cov, coef = "NEUTROPHILE", number = Inf)
+results_LYMPHOZYTEN <- topTable(fit_cov, coef = "LYMPHOZYTEN", number = Inf)
 summary(decideTests(fit2, adjust.method="fdr"))
 ```
 
-```{r}
-sigCpGsModel2 <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th,])
+Calculate the delta Beta values (effect size) adjusted for covariates:
 
-dm$model2_up <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & results_AFTER_vs_FUP1$logFC> lfc_th,])
-dm$model2_down <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & results_AFTER_vs_FUP1$logFC< -lfc_th,])
+```{r}
+# 1. Reconstruct fitted M-values using model coefficients
+coef_matrix <- fit$coefficients
+design_matrix <- design[colnames(M_values), ]  # Ensure sample order matches
+fitted_M <- coef_matrix %*% t(design_matrix)
+
+# 2. Convert to adjusted beta values
+adj_beta <- 2^fitted_M / (1 + 2^fitted_M)
+rownames(adj_beta) <- rownames(M_values)
+
+# 3. Define reference groups and contrast directions
+contrast_specs <- list(
+  BEFORE_vs_AFTER = list(ref = "BEFORE", comp = "AFTER"),
+  BEFORE_vs_FUP1 = list(ref = "BEFORE", comp = "FUP1"),
+  AFTER_vs_FUP1 = list(ref = "AFTER", comp = "FUP1")
+)
+
+# 4. Initialize results list
+results_list <- list(
+  BEFORE_vs_AFTER = results_BEFORE_vs_AFTER,
+  BEFORE_vs_FUP1 = results_BEFORE_vs_FUP1,
+  AFTER_vs_FUP1 = results_AFTER_vs_FUP1
+)
+
+# 5. Calculate delta beta for each contrast
+for (contrast in names(results_list)) {
+  spec <- contrast_specs[[contrast]]
+  
+  # Get reference samples
+  ref_samples <- which(meta$Timepoint == spec$ref)
+  
+  # Get comparison samples
+  comp_samples <- which(meta$Timepoint == spec$comp)
+  
+  # Calculate mean adjusted beta values
+  ref_beta <- rowMeans(adj_beta[, ref_samples], na.rm = TRUE)
+  comp_beta <- rowMeans(adj_beta[, comp_samples], na.rm = TRUE)
+  
+  # Get current results
+  res <- results_list[[contrast]]
+  cpg_ids <- rownames(res)
+  # Match CpG order
+  ref_beta <- ref_beta[cpg_ids]
+  comp_beta <- comp_beta[cpg_ids]
+  
+  # Calculate delta beta (covariate-adjusted)
+  delta_beta <- comp_beta - ref_beta
+  
+  # Add to results (direction matches contrast definition)
+  res$delta_beta <- delta_beta
+  res$ref_beta <- ref_beta
+  results_list[[contrast]] <- res
+}
+
+# 6. Update results data frames
+results_BEFORE_vs_AFTER <- results_list$BEFORE_vs_AFTER
+results_BEFORE_vs_FUP1 <- results_list$BEFORE_vs_FUP1
+results_AFTER_vs_FUP1 <- results_list$AFTER_vs_FUP1
+
+# # 7. For continuous variables: approximation
+# continuous_vars <- c("NEUTROPHILE", "LYMPHOZYTEN", "age", "Female_vs_Male")
+# for (var in continuous_vars) {
+#   res <- get(paste0("results_", var))
+#   
+#   # Calculate median baseline beta
+#   overall_mean_beta <- rowMeans(2^M_values/(1+2^M_values))
+#   
+#   # Approximation: Δβ ≈ logFC * β(1-β) (derivative of logit transform)
+#   res$delta_beta <- res$logFC * overall_mean_beta[rownames(res)] * 
+#                     (1 - overall_mean_beta[rownames(res)])
+#   
+#   assign(paste0("results_", var), res)
+# }
+```
+
+
+```{r}
+sigCpGsModel2 <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th,])
+
+dm$model2_up <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th & results_BEFORE_vs_FUP1$logFC> lfc_th,])
+dm$model2_down <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th & results_BEFORE_vs_FUP1$logFC< -lfc_th,])
 dm$NEUTROPHILE/LYMPHOZYTEN_up <- rownames(results_NEUTROPHILE/LYMPHOZYTEN[results_NEUTROPHILE/LYMPHOZYTEN$adj.P.Val<p_th & results_NEUTROPHILE/LYMPHOZYTEN$logFC> lfc_th,])
 dm$NEUTROPHILE/LYMPHOZYTEN_down <- rownames(results_NEUTROPHILE/LYMPHOZYTEN[results_NEUTROPHILE/LYMPHOZYTEN$adj.P.Val<p_th & results_NEUTROPHILE/LYMPHOZYTEN$logFC< -lfc_th,])
 
@@ -517,24 +617,25 @@ upset(fromList(dm[c("model1_down", "model2_down", "NEUTROPHILE/LYMPHOZYTEN_down"
 So it is true that almost all DM CpGs in model 2 are also present in model 1.
 
 ## GO Testing for model 2
+
 ```{r}
-sigCpGsModeldiff <- sigCpGsModel1[!sigCpGsModel1 %in% sigCpGsModel2]
-sigCpGs <- sigCpGsModel2
-check <- getMappedEntrezIDs(sig.cpg = sigCpGs)
-length(check$sig.eg)
-
+delta_beta_th <- 0.02
 p_th <- 0.05
-lfc_th <- 0.3
-sigCpGs <- rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<p_th & abs(results_AFTER_vs_FUP1$logFC)>lfc_th,])
+lfc_th <- 0
+```
+
+```{r}
+sigCpGs <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th & 
+                                             abs(results_BEFORE_vs_FUP1$logFC)>lfc_th &
+                                             abs(results_BEFORE_vs_FUP1$delta_beta) > delta_beta_th,])
 check <- getMappedEntrezIDs(sig.cpg = sigCpGs)
 length(check$sig.eg)
-
 ```
 
 ::: {.panel-tabset}
 ### GO
 ```{r, fig.width=5, fig.height=10}
-gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), 
+gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), 
               collection="GO", array.type = c("EPIC"),
               plot.bias=TRUE, sig.genes = FALSE)
 
@@ -577,7 +678,7 @@ enrichplot::dotplot(compare_cluster_obj,
 
 ### KEGG
 ```{r, fig.width=5, fig.height=10}
-gst.kegg <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), 
+gst.kegg <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), 
                    array.type = c("EPIC"), collection="KEGG",
                    sig.genes = TRUE)
 
@@ -598,7 +699,7 @@ enrichplot::dotplot(compare_cluster_obj,
 
 ### KEGG promoter
 ```{r}
-gst.kegg.prom <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), array.type = c("EPIC"),
+gst.kegg.prom <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), array.type = c("EPIC"),
                         collection="KEGG", genomic.features = c("TSS200",
                                                                 "TSS1500",
                                                                 "1stExon"))
@@ -619,49 +720,188 @@ enrichplot::dotplot(compare_cluster_obj,
 
 ### KEGG gene body
 ```{r}
-gst.kegg.body <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), 
+gst.kegg.body <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), 
                         collection="KEGG", array.type = c("EPIC"), genomic.features = c("Body"))
 topGSA(gst.kegg.body, n=20)
 
-gst.kegg.body <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_AFTER_vs_FUP1), 
+gst.kegg.body <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), 
                         collection="KEGG", array.type = c("EPIC"), genomic.features = c("Body"), sig.genes = TRUE)
 topGSA(gst.kegg.body, n=10)
 ```
 
 :::
 
-```{r}
-sigCpGsModel2 <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th,])
-```
-
 # Visualization
+
 ```{r}
-for (cov in candidate_covariates) {
-  p1 <- meta %>% filter(Timepoint %in% c("BEFORE", "AFTER")) %>%
-    ggpaired(x = "Timepoint", y = cov, color = "Timepoint", 
-           line.color = "gray", line.size = 0.4, 
-           palette = c("#00AFBB", "#E7B800")) +
-    labs(x = "Time point", y=cov) +
-    ylim(min(meta[,cov]), max(meta[,cov])) +
-    stat_compare_means(paired = TRUE, label.y = max(meta[,cov]))
-  
-  p2 <- meta %>% filter(Timepoint %in% c("BEFORE", "FUP1")) %>%
-  ggpaired(x = "Timepoint", y = cov, color = "Timepoint", 
-           line.color = "gray", line.size = 0.4, 
-           palette = c("#00AFBB", "#FC4E07")) +
-    labs(x = "Time point", y=cov) +
-    ylim(min(meta[,cov]), max(meta[,cov])) +
-    stat_compare_means(paired = TRUE,  label.y = max(meta[,cov]))
-  
-  p3 <- meta %>% filter(Timepoint %in% c("AFTER", "FUP1")) %>%
-  ggpaired(x = "Timepoint", y = cov, color = "Timepoint", 
-           line.color = "gray", line.size = 0.4, 
-           palette = c("#E7B800", "#FC4E07")) +
-    labs(x = "Time point", y=cov) +
-   ylim(min(meta[,cov]), max(meta[,cov])) +
-    stat_compare_means(paired = TRUE,  label.y = max(meta[,cov]))
-  
-  grid.arrange(p1, p2, p3, ncol = 3)
-}
+res <- results_BEFORE_vs_FUP1
+
+ann <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+res$CpG <- rownames(res)
+res$logP <- -log10(res$adj.P.Val)
+ann_sub <- ann[rownames(ann) %in% res$CpG, ]
+ann_sub$CpG <- rownames(ann_sub)
+res$significance <- "Not Sig"
+res$significance[res$adj.P.Val < p_th & res$logFC > lfc_th & res$delta_beta < -delta_beta_th] <- "Hypermethylated"
+res$significance[res$adj.P.Val < p_th & res$logFC < -lfc_th& res$delta_beta > delta_beta_th] <- "Hypomethylated"
+res_annot <- as.data.frame(merge(res, ann_sub, by = "CpG", all.x = TRUE))
+res_sig <- res_annot[res_annot$significance != "Not Sig", ]
 ```
 
+```{r}
+# Manhattan plot
+df <- res_annot %>% select(CpG, chr, pos, P.Value, adj.P.Val, delta_beta) 
+
+# 2. Clean chromosome labels (keep 1..22, X, Y)
+df <- df %>% 
+  mutate(chr = gsub("chr", "", chr)) %>%
+  filter(chr %in% c(1:22, "X", "Y")) %>%
+  mutate(chr = factor(chr, levels=c(1:22,"X","Y")))
+
+# 3. Compute cumulative basepair positions for each chromosome
+chr_lengths <- df %>%
+  group_by(chr) %>%
+  summarise(chr_len = max(pos)) %>%
+  arrange(chr)
+
+chr_offsets <- cumsum(as.numeric(chr_lengths$chr_len)) - chr_lengths$chr_len
+names(chr_offsets) <- chr_lengths$chr
+
+df <- df %>%
+  arrange(chr, pos) %>%
+  mutate(bp_cum = pos + chr_offsets[as.character(chr)])
+
+# 4. Axis positions for labeling chromosomes
+axis_df <- df %>% 
+  group_by(chr) %>% 
+  summarise(center = (min(bp_cum) + max(bp_cum)) / 2)
+
+# 5. Manhattan plot
+p_manhattan <- ggplot(df, aes(x=bp_cum, y=-log10(P.Value), color=as.factor(chr))) +
+  geom_point_rast(alpha=0.6, size=0.8) +
+  scale_color_manual(values=rep(c("grey30","grey60"), length.out=length(unique(df$chr)))) +
+  scale_x_continuous(label=axis_df$chr, breaks=axis_df$center) +
+  labs(x="Chromosome", y="-log10(p)") +
+  theme_classic() +
+  theme(legend.position="none") +
+  # geom_hline(yintercept=-log10(0.05), linetype="dashed", color="black") +
+  geom_point(data=subset(df, adj.P.Val < 0.05 & delta_beta > 0.02), color="red", size=0.8) +
+  geom_point(data=subset(df, adj.P.Val < 0.05 & delta_beta < -0.02), color="blue", size=0.8)
+
+save(p_manhattan, file="figures/p_manhattan.RData")
+
+pdf("figures/manhattan.pdf", width=15, height=6)
+plot(p_manhattan)
+dev.off() 
+```
+
+```{r}
+n_hyper <- sum(res$significance == "Hypermethylated", na.rm = TRUE)
+n_hypo <- sum(res$significance == "Hypomethylated", na.rm = TRUE)
+
+# Basic volcano plot
+volcano <- ggplot(res, aes(x = delta_beta, y = logP)) +
+  rasterise(geom_point(aes(color = significance), alpha = 0.7), dpi = 300) +
+  scale_color_manual(values = c("Hypermethylated" = "red", 
+                                "Hypomethylated" = "blue", 
+                                "Not Sig" = "grey")) +
+  geom_vline(xintercept = c(-delta_beta_th, delta_beta_th), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(p_th), linetype = "dashed", color = "black") +
+  theme_minimal() +
+  labs(title = "Volcano Plot of Differential Methylation",
+       x = "Beta Value Change",
+       y = "-log10(P-value)",
+       color = "Significance")
+
+p1 <- volcano +
+  annotate("text", 
+           x = max(res$delta_beta, na.rm = TRUE) * 0.35, 
+           y = max(res$logP, na.rm = TRUE) * 0.85, 
+           label = paste0("Hypermethylated: ", n_hyper, "\nHypomethylated: ", n_hypo),
+           hjust = 0, size = 4, fontface = "italic")
+
+top_hits <- rbind(res_sig[order(res_sig$adj.P.Val), ][1:10, ],res_sig[order(abs(res_sig$delta_beta), decreasing = TRUE), ][1:10, ])
+top_hits <- top_hits %>% filter(UCSC_RefGene_Name != "")
+top_hits$Gene_Symbol <- sapply(strsplit(top_hits$UCSC_RefGene_Name, ";"), `[`, 1)
+p1 <- p1 + geom_text_repel(data = top_hits, aes(x = delta_beta, y = logP, label = Gene_Symbol), 
+                           size = 2,
+                           inherit.aes = FALSE)
+```
+
+```{r}
+plot_df <- as.data.frame(table(res_sig$significance, res_sig$Relation_to_Island))
+colnames(plot_df) <- c("Direction", "Region", "Count")
+plot_df$Region <- factor(plot_df$Region, 
+                         levels = c("Island", "N_Shore", "S_Shore", "N_Shelf", "S_Shelf", "OpenSea"))
+
+bg_df <- as.data.frame(table(res_annot$Relation_to_Island))
+colnames(bg_df) <- c("Region", "Count")
+bg_df$Region <- factor(bg_df$Region, 
+                         levels = c("Island", "N_Shore", "S_Shore", "N_Shelf", "S_Shelf", "OpenSea"))
+bg_df$Direction <- "all_CpGs"
+
+p3 <- rbind(plot_df, bg_df) %>% mutate(Direction = factor(Direction, levels = c("all_CpGs", "Hypomethylated","Hypermethylated" ))) %>%
+ggplot(aes(x = Direction, y = Count, fill =Region)) +
+  geom_bar(position="fill", stat = "identity") +
+  theme_minimal() +
+  labs(title = "Distribution of Differentially Methylated CpGs",
+       x = "Differentially Methylated CpGs", y = "Percentage", fill = "Region") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  scale_fill_brewer(palette="Set2")
+p3
+```
+
+```{r}
+# Assume res_sig has a column UCSC_RefGene_Group with semicolon-separated entries
+res_long <- res_sig %>%
+  separate_rows(UCSC_RefGene_Group, sep = ";") %>%
+  filter(!is.na(UCSC_RefGene_Group))
+
+# Now you can count and plot like before:
+plot_df <- res_long %>%
+  group_by(significance, UCSC_RefGene_Group) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(UCSC_RefGene_Group) %>%
+  mutate(Ratio = Count / sum(Count))
+
+plot_df$UCSC_RefGene_Group <- factor(plot_df$UCSC_RefGene_Group, 
+                                        levels = c("Promoter", "TSS200","TSS1500","5'UTR","1stExon","Body","ExonBnd","3'UTR", ""), labels = c("Promoter", "TSS200","TSS1500","5'UTR","1stExon","Body","ExonBnd","3'UTR", "Others"))
+
+bg_long <- res_annot %>%
+  separate_rows(UCSC_RefGene_Group, sep = ";") %>%
+  filter(!is.na(UCSC_RefGene_Group))
+
+# Now you can count and plot like before:
+bg_df <- bg_long %>%
+  group_by(UCSC_RefGene_Group) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(UCSC_RefGene_Group) %>%
+  mutate(Ratio = Count / sum(Count))
+
+bg_df$UCSC_RefGene_Group <- factor(bg_df$UCSC_RefGene_Group, 
+                                        levels = c("Promoter", "TSS200","TSS1500","5'UTR","1stExon","Body","ExonBnd","3'UTR", ""), labels = c("Promoter", "TSS200","TSS1500","5'UTR","1stExon","Body","ExonBnd","3'UTR", "Others"))
+
+bg_df$significance <- "all_CpGs"
+
+p4 <- rbind(plot_df, bg_df) %>% mutate(significance = factor(significance, levels = c("all_CpGs", "Hypomethylated", "Hypermethylated"))) %>%
+ggplot(aes(x = significance, y = Count, fill = UCSC_RefGene_Group)) +
+  geom_bar(position="fill", stat = "identity") +
+  theme_minimal() +
+  labs(title = "Distribution of Differentially Methylated CpGs",
+       x = "Differentially Methylated CpGs", y = "Percentage", fill = "Region") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  scale_fill_brewer(palette="Set1")
+
+p4
+```
+
+```{r}
+p5 <- plot_grid(p3, p4, labels=c("b","c"), label_size=20, ncol=1, rel_heights = c(1, 1))
+p0 <- plot_grid(p1, p5, labels=c("a",""), label_size=20, ncol=2, rel_widths = c(1.45, 1))
+
+grDevices::cairo_pdf("figures/Fig3.pdf", width=13, height=6)
+print(p0)
+dev.off()
+```
