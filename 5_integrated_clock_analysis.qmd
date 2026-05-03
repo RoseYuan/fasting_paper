@@ -28,6 +28,8 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE,
                       class.output="bg-light")
 ```
 
+# Load
+
 ```{r libraries, message=FALSE, warning=FALSE}
 # Visualization
 library(ggplot2)
@@ -374,9 +376,20 @@ format_component_blood_cell_effects <- function(adjusted_res,
 }
 ```
 
+## Check collinearity of blood cell covariates
+
+```{r}
+# check collinearity for blood cell covariates: lymphocytes and neutrophils
+cor(df_age$LYMPHOZYTEN, df_age$NEUTROPHILE)
+lm_model <- lm(epi_age_Horvath ~LYMPHOZYTEN + NEUTROPHILE, data = df_age)
+car::vif(lm_model)
+```
+
+Correlation is -0.93, which is very high. VIFs are around 7.5, which is high. This suggests that there is strong collinearity, and one should include only one of the two covariates in the model.
+
 ```{r run-main-analysis, fig.width=10, fig.height=6}
 # Run main analysis pipeline
-main_res <- main(df_age, clock_cols, covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+main_res <- main(df_age, clock_cols, covariates = c("Gender", "LYMPHOZYTEN"))
 main_res_no_cell <- main(df_age, clock_cols, covariates = "Gender")
 data_wide <- main_res$data_wide
 
@@ -441,6 +454,566 @@ dev.off()
 pdf("figures/raincloud_no_blood_cell_adjustment.pdf", width = 8, height = 5)
 plot(main_res_no_cell$p2)
 dev.off()
+```
+
+# Decomposition Analysis
+
+This decomposition estimates the part of each clock signal explained by blood
+cell composition and then tests whether the composition-derived and residual
+components change over time. Because lymphocytes and neutrophils are highly
+collinear in this dataset, the default model uses lymphocytes only.
+
+Step A - predict the composition component:
+
+```r
+clock ~ lymphocytes + (1|subject)
+```
+
+In the code below, this is fit as:
+
+```r
+clock_RAA_z_base ~ LYMPHOZYTEN_z + (1|ID)
+```
+
+Step B - compute the two decomposed clock components:
+
+* `composition_component`: predicted value from fixed effects of lymphocytes
+* `residual_component`: observed clock value minus the composition component
+
+```r
+composition_component = predict(model, re.form = NA)
+residual_component = observed_clock - composition_component
+```
+
+Step C - test whether each component changes over time, adjusted for gender:
+
+```r
+composition_component ~ Timepoint + Gender + (1|ID)
+residual_component ~ Timepoint + Gender + (1|ID)
+```
+
+Step D - visualize the decomposition:
+
+* Option A: composition component and residual component trajectories over time
+* Option B: unadjusted versus lymphocyte-adjusted time effects per clock
+
+Optional interpretation:
+
+* `composition-driven`: the composition component changes over time and explains the clock response
+* `intrinsic`: the residual component changes over time after removing composition signal
+* `masked`: the adjusted and unadjusted effects differ substantially, suggesting composition masks or inflates the apparent clock response
+
+## Lymphocyte Change From Baseline
+
+This section visualizes the within-subject change in lymphocytes from D-1 and summarizes the mean, standard deviation, and coefficient of variation at each follow-up timepoint.
+
+```{r lymphocyte-change-from-baseline, fig.width=6, fig.height=4, results='asis'}
+lymphocyte_delta_data <- data_wide %>%
+  select(ID, Timepoint, LYMPHOZYTEN) %>%
+  group_by(ID) %>%
+  mutate(
+    lymphocyte_baseline = LYMPHOZYTEN[Timepoint == "D-1"][1],
+    lymphocyte_delta = LYMPHOZYTEN - lymphocyte_baseline
+  ) %>%
+  ungroup() %>%
+  filter(Timepoint != "D-1") %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("D+10", "M+1")))
+
+lymphocyte_change_summary <- lymphocyte_delta_data %>%
+  group_by(Timepoint) %>%
+  summarise(
+    n = sum(!is.na(lymphocyte_delta)),
+    mean_delta = mean(lymphocyte_delta, na.rm = TRUE),
+    sd_delta = sd(lymphocyte_delta, na.rm = TRUE),
+    cv_delta = sd_delta / abs(mean_delta),
+    cv_delta_percent = 100 * cv_delta,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    mean_sd = sprintf("%.3f +/- %.3f", mean_delta, sd_delta),
+    across(c(mean_delta, sd_delta, cv_delta, cv_delta_percent), ~ round(.x, 3))
+  )
+
+lymphocyte_plot_labels <- lymphocyte_change_summary %>%
+  mutate(
+    label = sprintf(
+      "mean = %.3f\nSD = %.3f\nCV = %.1f%%",
+      mean_delta,
+      sd_delta,
+      cv_delta_percent
+    )
+  ) %>%
+  left_join(
+    lymphocyte_delta_data %>%
+      group_by(Timepoint) %>%
+      summarise(
+        y_top = max(lymphocyte_delta, na.rm = TRUE),
+        y_bottom = min(lymphocyte_delta, na.rm = TRUE),
+        .groups = "drop"
+      ),
+    by = "Timepoint"
+  ) %>%
+  mutate(
+    y_span = y_top - y_bottom,
+    y = y_top - 0.05 * y_span
+  )
+
+lymphocyte_y_limits <- range(lymphocyte_delta_data$lymphocyte_delta, na.rm = TRUE)
+lymphocyte_y_span <- diff(lymphocyte_y_limits)
+if (lymphocyte_y_span == 0) lymphocyte_y_span <- 1
+
+render_table(
+  lymphocyte_change_summary,
+  caption = "Mean, SD, and coefficient of variation of within-subject lymphocyte changes from D-1"
+)
+
+p_lymphocyte_delta <- ggplot(
+  lymphocyte_delta_data,
+  aes(x = Timepoint, y = lymphocyte_delta)
+) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.3) +
+  geom_jitter(width = 0.08, height = 0, alpha = 0.6, size = 1.4) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    size = 2.6,
+    color = "red"
+  ) +
+  stat_summary(
+    fun.data = function(x) {
+      data.frame(
+        y = mean(x, na.rm = TRUE),
+        ymin = mean(x, na.rm = TRUE) - sd(x, na.rm = TRUE),
+        ymax = mean(x, na.rm = TRUE) + sd(x, na.rm = TRUE)
+      )
+    },
+    geom = "errorbar",
+    width = 0.12,
+    color = "red"
+  ) +
+  geom_text(
+    data = lymphocyte_plot_labels,
+    aes(x = Timepoint, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 3.2,
+    vjust = 1,
+    lineheight = 0.9
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0.08, 0.12))
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(t = 8, r = 8, b = 8, l = 8)
+  ) +
+  labs(
+    title = "Within-subject lymphocyte change from baseline",
+    x = NULL,
+    y = expression(Delta * "lymphocytes from D-1")
+  )
+
+p_lymphocyte_delta
+```
+
+```{r decomposition-functions}
+extract_time_contrasts <- function(fit,
+                                   time_var = "Timepoint",
+                                   baseline_label = "D-1",
+                                   ci_level = 0.95) {
+  emm <- emmeans(fit, specs = time_var)
+  ref_idx <- which(emm@levels[[time_var]] == baseline_label)
+
+  if (length(ref_idx) != 1) {
+    stop("baseline_label must be one of the fitted timepoint levels.")
+  }
+
+  as.data.frame(
+    summary(
+      contrast(emm, method = "trt.vs.ctrl", ref = ref_idx),
+      infer = TRUE,
+      level = ci_level
+    )
+  ) %>%
+    as_tibble() %>%
+    transmute(
+      contrast,
+      timepoint = str_match(contrast, "^\\(?([^()]+)\\)? - ")[, 2],
+      effect_size = estimate,
+      lower_95 = lower.CL,
+      upper_95 = upper.CL,
+      SE,
+      df,
+      p_value = p.value
+    )
+}
+
+decompose_clock_composition <- function(data_wide,
+                                        clock_cols,
+                                        cell_covariates = "LYMPHOZYTEN",
+                                        value_suffix = "_RAA_z_base",
+                                        adjustment_covariates = "Gender",
+                                        id_col = "ID",
+                                        time_col = "Timepoint",
+                                        baseline_label = "D-1",
+                                        ci_level = 0.95,
+                                        REML = TRUE) {
+  value_cols <- paste0(clock_cols, value_suffix)
+  cell_covariates_z <- paste0(cell_covariates, "_z")
+
+  df_model <- data_wide %>%
+    mutate(
+      across(
+        all_of(cell_covariates),
+        ~ as.numeric(scale(.x)),
+        .names = "{.col}_z"
+      )
+    )
+
+  decomposed_data <- bind_rows(lapply(seq_along(clock_cols), function(i) {
+    clock <- clock_cols[[i]]
+    value_col <- value_cols[[i]]
+    need_vars <- unique(c(
+      id_col,
+      time_col,
+      value_col,
+      cell_covariates_z,
+      adjustment_covariates
+    ))
+
+    dat <- df_model %>%
+      select(all_of(need_vars)) %>%
+      drop_na()
+
+    if (nrow(dat) < 5) return(NULL)
+
+    form_txt <- sprintf(
+      "%s ~ %s + (1|%s)",
+      value_col,
+      paste(cell_covariates_z, collapse = " + "),
+      id_col
+    )
+    fit <- lmer(as.formula(form_txt), data = dat, REML = REML)
+
+    dat %>%
+      mutate(
+        clock = clock,
+        observed_component = .data[[value_col]],
+        composition_component = as.numeric(predict(fit, re.form = NA)),
+        residual_component = observed_component - composition_component
+      ) %>%
+      select(
+        all_of(c(id_col, time_col)),
+        all_of(adjustment_covariates),
+        clock,
+        observed_component,
+        composition_component,
+        residual_component
+      )
+  }))
+
+  time_effects <- decomposed_data %>%
+    pivot_longer(
+      cols = c(composition_component, residual_component),
+      names_to = "component",
+      values_to = "value"
+    ) %>%
+    group_by(clock, component) %>%
+    group_modify(~ {
+      dat <- .x %>%
+        mutate("{time_col}" := relevel(factor(.data[[time_col]]), ref = baseline_label))
+      rhs_terms <- c(time_col, adjustment_covariates)
+
+      fit <- lmer(
+        as.formula(sprintf(
+          "value ~ %s + (1|%s)",
+          paste(rhs_terms, collapse = " + "),
+          id_col
+        )),
+        data = dat,
+        REML = REML
+      )
+
+      extract_time_contrasts(
+        fit,
+        time_var = time_col,
+        baseline_label = baseline_label,
+        ci_level = ci_level
+      )
+    }) %>%
+    ungroup()
+
+  list(data = decomposed_data, effects = time_effects)
+}
+
+decomposition_p_to_stars <- function(p) {
+  case_when(
+    is.na(p) ~ "",
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+```
+
+```{r decomposition-analysis, fig.width=10, fig.height=6, results='asis'}
+decomp_res <- decompose_clock_composition(
+  data_wide,
+  clock_cols,
+  cell_covariates = "LYMPHOZYTEN",
+  adjustment_covariates = "Gender"
+)
+
+decomposition_effect_sizes <- decomp_res$effects %>%
+  mutate(
+    component = recode(
+      component,
+      "composition_component" = "Composition component",
+      "residual_component" = "Residual component"
+    ),
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  ) %>%
+  arrange(clock, component, timepoint)
+
+render_table(
+  decomposition_effect_sizes,
+  caption = "Timepoint effects for composition-derived and residual clock components"
+)
+
+decomposition_plot_data <- decomp_res$data %>%
+  pivot_longer(
+    cols = c(composition_component, residual_component),
+    names_to = "component",
+    values_to = "value"
+  ) %>%
+  mutate(
+    component = recode(
+      component,
+      "composition_component" = "Composition component",
+      "residual_component" = "Residual component"
+    )
+  )
+decomposition_time_levels <- c("D-1", "D+10", "M+1")
+decomposition_plot_data <- decomposition_plot_data %>%
+  mutate(
+    Timepoint = factor(Timepoint, levels = decomposition_time_levels),
+    clock = factor(clock, levels = clock_cols)
+  )
+
+decomposition_stars <- decomp_res$effects %>%
+  mutate(
+    component = recode(
+      component,
+      "composition_component" = "Composition component",
+      "residual_component" = "Residual component"
+    ),
+    stars = decomposition_p_to_stars(p_value)
+  ) %>%
+  filter(stars != "ns", !is.na(timepoint)) %>%
+  left_join(
+    decomposition_plot_data %>%
+      group_by(clock, component, Timepoint) %>%
+      summarise(y_top = max(value, na.rm = TRUE), .groups = "drop"),
+    by = c("clock", "component", "timepoint" = "Timepoint")
+  ) %>%
+  mutate(
+    y = y_top + 0.15,
+    Timepoint = factor(timepoint, levels = decomposition_time_levels),
+    clock = factor(clock, levels = clock_cols)
+  )
+
+p_decomposition <- ggplot(
+  decomposition_plot_data,
+  aes(x = Timepoint, y = value, group = ID)
+) +
+  geom_line(color = "grey75", linewidth = 0.3, alpha = 0.6) +
+  geom_point(color = "grey45", size = 0.8, alpha = 0.6) +
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "line",
+    color = "black",
+    linewidth = 0.7
+  ) +
+  stat_summary(
+    aes(group = 1),
+    fun.data = mean_cl_boot,
+    geom = "errorbar",
+    width = 0.12,
+    color = "black"
+  ) +
+  geom_text(
+    data = decomposition_stars,
+    aes(x = Timepoint, y = y, label = stars),
+    inherit.aes = FALSE,
+    vjust = 0,
+    size = 4,
+    color = "blue"
+  ) +
+  facet_grid(component ~ clock, scales = "free_y") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Spaghetti plot: lymphocyte-associated and residual clock components",
+    x = NULL,
+    y = "SRAA component"
+  )
+
+p_decomposition
+```
+
+```{r decomposition-raincloud, fig.width=10, fig.height=6}
+decomposition_delta <- decomposition_plot_data %>%
+  group_by(ID, clock, component) %>%
+  mutate(
+    baseline_value = value[Timepoint == "D-1"][1],
+    delta = value - baseline_value
+  ) %>%
+  ungroup() %>%
+  mutate(clock = factor(clock, levels = clock_cols)) %>%
+  filter(Timepoint != "D-1")
+
+decomposition_delta_stars <- decomp_res$effects %>%
+  mutate(
+    component = recode(
+      component,
+      "composition_component" = "Composition component",
+      "residual_component" = "Residual component"
+    ),
+    stars = decomposition_p_to_stars(p_value),
+    Timepoint = factor(timepoint, levels = decomposition_time_levels)
+  ) %>%
+  filter(stars != "ns", !is.na(timepoint)) %>%
+  left_join(
+    decomposition_delta %>%
+      group_by(clock, component, Timepoint) %>%
+      summarise(y_top = max(delta, na.rm = TRUE), .groups = "drop"),
+    by = c("clock", "component", "Timepoint")
+  ) %>%
+  mutate(
+    y = y_top + 0.15,
+    clock = factor(clock, levels = clock_cols)
+  )
+
+p_decomposition_raincloud <- ggplot(
+  decomposition_delta,
+  aes(x = clock, y = delta)
+) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_violin(
+    width = 0.8,
+    fill = "grey88",
+    color = "grey55",
+    linewidth = 0.3,
+    trim = FALSE
+  ) +
+  geom_jitter(width = 0.12, height = 0, alpha = 0.55, size = 1) +
+  stat_summary(
+    fun = mean,
+    geom = "crossbar",
+    width = 0.35,
+    fatten = 2,
+    color = "red"
+  ) +
+  geom_text(
+    data = decomposition_delta_stars,
+    aes(x = clock, y = y, label = stars),
+    inherit.aes = FALSE,
+    vjust = 0,
+    size = 4,
+    color = "blue"
+  ) +
+  facet_grid(component ~ Timepoint, scales = "free_y") +
+  theme_bw(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  labs(
+    title = "Raincloud plot: within-subject component changes from baseline",
+    x = NULL,
+    y = "Delta SRAA component from D-1"
+  )
+
+p_decomposition_raincloud
+```
+
+```{r decomposition-adjusted-vs-unadjusted, fig.width=8, fig.height=5}
+adjusted_vs_unadjusted <- timepoint_effect_sizes %>%
+  select(model, clock, timepoint, effect_size, p_value) %>%
+  pivot_wider(
+    names_from = model,
+    values_from = c(effect_size, p_value)
+  ) %>%
+  mutate(
+    delta_diff =
+      `effect_size_With blood-cell adjustment` -
+      `effect_size_Without blood-cell adjustment`,
+    sig_category = case_when(
+      `p_value_Without blood-cell adjustment` < 0.05 &
+        `p_value_With blood-cell adjustment` < 0.05 ~ "both",
+      `p_value_Without blood-cell adjustment` < 0.05 &
+        `p_value_With blood-cell adjustment` >= 0.05 ~ "unadjusted_only",
+      `p_value_Without blood-cell adjustment` >= 0.05 &
+        `p_value_With blood-cell adjustment` < 0.05 ~ "adjusted_only",
+      TRUE ~ "none"
+    ),
+    sig_category = factor(
+      sig_category,
+      levels = c("both", "unadjusted_only", "adjusted_only", "none")
+    )
+  )
+
+p_adjusted_vs_unadjusted <- ggplot(
+  adjusted_vs_unadjusted,
+  aes(
+    x = `effect_size_Without blood-cell adjustment`,
+    y = `effect_size_With blood-cell adjustment`,
+    label = clock,
+    color = delta_diff,
+    shape = sig_category
+  )
+) +
+  geom_hline(yintercept = 0, linewidth = 0.3, alpha = 0.5) +
+  geom_vline(xintercept = 0, linewidth = 0.3, alpha = 0.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", alpha = 0.6) +
+  geom_point(size = 2.5) +
+  geom_text_repel(size = 3, max.overlaps = Inf) +
+  scale_color_gradient2(
+    low = "blue",
+    mid = "grey40",
+    high = "red",
+    midpoint = 0,
+    name = expression(Delta * "adjusted - " * Delta * "unadjusted")
+  ) +
+  scale_shape_manual(
+    values = c(
+      "both" = 16,
+      "unadjusted_only" = 17,
+      "adjusted_only" = 15,
+      "none" = 1
+    ),
+    labels = c(
+      "both" = "Both significant",
+      "unadjusted_only" = "Unadjusted only",
+      "adjusted_only" = "Adjusted only",
+      "none" = "Neither significant"
+    ),
+    name = "p < 0.05"
+  ) +
+  facet_wrap(~timepoint) +
+  coord_equal() +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Clock time effects before and after lymphocyte adjustment",
+    subtitle = "Warm colors: adjusted > unadjusted; cool colors: adjusted < unadjusted; neutral: near zero difference",
+    x = "Unadjusted time effect",
+    y = "Lymphocyte-adjusted time effect"
+  )
+
+p_adjusted_vs_unadjusted
 ```
 
 # PCA Analysis on Delta SRAA
@@ -985,7 +1558,7 @@ pc_grimage_cols <- c(
   "PCPACKYRS", "PCADM", "PCB2M", "PCCystatinC",
   "PCGDF15", "PCLeptin", "PCPAI1", "PCTIMP1"
 )
-res_pc_grimage <- main(df_age, pc_grimage_cols, covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+res_pc_grimage <- main(df_age, pc_grimage_cols, covariates = c("Gender", "LYMPHOZYTEN"))
 res_pc_grimage_no_cell <- main(df_age, pc_grimage_cols, covariates = "Gender")
 
 # GrimAge v1 components
@@ -996,7 +1569,7 @@ grimage1_cols <- paste0("GrimAge", c(
 res1 <- main(df_age, grimage1_cols, 
              remove_prefix = TRUE, 
              prefix_patterns = "GrimAge", 
-             covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+             covariates = c("Gender", "LYMPHOZYTEN"))
 res1_no_cell <- main(df_age, grimage1_cols, 
                      remove_prefix = TRUE, 
                      prefix_patterns = "GrimAge",
@@ -1010,7 +1583,7 @@ grimage2_cols <- paste0("GrimAge2", c(
 res2 <- main(df_age, grimage2_cols, 
              remove_prefix = TRUE, 
              prefix_patterns = "GrimAge2", 
-             covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+             covariates = c("Gender", "LYMPHOZYTEN"))
 res2_no_cell <- main(df_age, grimage2_cols, 
                      remove_prefix = TRUE, 
                      prefix_patterns = "GrimAge2",
@@ -1113,7 +1686,7 @@ systemsage_cols <- c(
   "Immune", "Kidney", "Liver", "Metabolic", "Lung", "MusculoSkeletal"
 )
 
-ress <- main(df_age, systemsage_cols, covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+ress <- main(df_age, systemsage_cols, covariates = c("Gender", "LYMPHOZYTEN"))
 ress_no_cell <- main(df_age, systemsage_cols, covariates = "Gender")
 
 ress$p2
