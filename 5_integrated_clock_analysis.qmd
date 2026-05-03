@@ -55,13 +55,20 @@ library(writexl)
 ```
 
 ```{r table-helpers}
-render_table <- function(x, caption = NULL, digits = 3) {
+render_table <- function(x, caption = NULL, digits = 3, font_size = "11px") {
   if (is.null(x) || nrow(x) == 0) {
     cat("_No rows to display._\n")
     return(invisible(NULL))
   }
 
-  knitr::kable(x, digits = digits, caption = caption, format = "html")
+  knitr::kable(x, digits = digits, caption = caption, format = "html") %>%
+    as.character() %>%
+    sprintf(
+      "<div style='font-size: %s; overflow-x: auto;'>%s</div>",
+      font_size,
+      .
+    ) %>%
+    knitr::asis_output()
 }
 
 arrange_adjustment_pairs <- function(df, group_cols, adjustment_col = "model") {
@@ -755,6 +762,174 @@ decomposition_p_to_stars <- function(p) {
     TRUE ~ "ns"
   )
 }
+
+clean_decomposition_labels <- function(x, prefix_patterns = NULL) {
+  out <- x
+  if (!is.null(prefix_patterns)) {
+    for (pattern in prefix_patterns) {
+      out <- str_remove(out, paste0("^", pattern))
+    }
+  }
+  out
+}
+
+prepare_decomposition_outputs <- function(decomp_res,
+                                          clock_cols,
+                                          prefix_patterns = NULL,
+                                          title_prefix = "Clock",
+                                          y_label = "SRAA component") {
+  clock_labels <- setNames(
+    clean_decomposition_labels(clock_cols, prefix_patterns),
+    clock_cols
+  )
+
+  effect_sizes <- decomp_res$effects %>%
+    mutate(
+      clock = factor(clock, levels = clock_cols),
+      clock_label = clock_labels[as.character(clock)],
+      component = recode(
+        component,
+        "composition_component" = "Composition component",
+        "residual_component" = "Residual component"
+      )
+    ) %>%
+    arrange(clock, component, timepoint)
+
+  plot_data <- decomp_res$data %>%
+    pivot_longer(
+      cols = c(composition_component, residual_component),
+      names_to = "component",
+      values_to = "value"
+    ) %>%
+    mutate(
+      component = recode(
+        component,
+        "composition_component" = "Composition component",
+        "residual_component" = "Residual component"
+      ),
+      clock = factor(clock, levels = clock_cols),
+      clock_label = factor(clock_labels[as.character(clock)], levels = unname(clock_labels)),
+      Timepoint = factor(Timepoint, levels = c("D-1", "D+10", "M+1"))
+    )
+
+  stars <- effect_sizes %>%
+    mutate(stars = decomposition_p_to_stars(p_value)) %>%
+    filter(stars != "ns", !is.na(timepoint)) %>%
+    left_join(
+      plot_data %>%
+        group_by(clock, component, Timepoint) %>%
+        summarise(y_top = max(value, na.rm = TRUE), .groups = "drop"),
+      by = c("clock", "component", "timepoint" = "Timepoint")
+    ) %>%
+    mutate(
+      y = y_top + 0.15,
+      Timepoint = factor(timepoint, levels = c("D-1", "D+10", "M+1")),
+      clock_label = factor(clock_labels[as.character(clock)], levels = unname(clock_labels))
+    )
+
+  p_spaghetti <- ggplot(plot_data, aes(x = Timepoint, y = value, group = ID)) +
+    geom_line(color = "grey75", linewidth = 0.3, alpha = 0.6) +
+    geom_point(color = "grey45", size = 0.8, alpha = 0.6) +
+    stat_summary(
+      aes(group = 1),
+      fun = mean,
+      geom = "line",
+      color = "black",
+      linewidth = 0.7
+    ) +
+    stat_summary(
+      aes(group = 1),
+      fun.data = mean_cl_boot,
+      geom = "errorbar",
+      width = 0.12,
+      color = "black"
+    ) +
+    geom_text(
+      data = stars,
+      aes(x = Timepoint, y = y, label = stars),
+      inherit.aes = FALSE,
+      vjust = 0,
+      size = 4,
+      color = "blue"
+    ) +
+    facet_grid(component ~ clock_label, scales = "free_y") +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(
+      title = paste0("Spaghetti plot: ", title_prefix, " lymphocyte-associated and residual components"),
+      x = NULL,
+      y = y_label
+    )
+
+  delta_data <- plot_data %>%
+    group_by(ID, clock, clock_label, component) %>%
+    mutate(
+      baseline_value = value[Timepoint == "D-1"][1],
+      delta = value - baseline_value
+    ) %>%
+    ungroup() %>%
+    filter(Timepoint != "D-1")
+
+  delta_stars <- effect_sizes %>%
+    mutate(
+      stars = decomposition_p_to_stars(p_value),
+      Timepoint = factor(timepoint, levels = c("D-1", "D+10", "M+1")),
+      clock_label = factor(clock_labels[as.character(clock)], levels = unname(clock_labels))
+    ) %>%
+    filter(stars != "ns", !is.na(timepoint)) %>%
+    left_join(
+      delta_data %>%
+        group_by(clock, component, Timepoint) %>%
+        summarise(y_top = max(delta, na.rm = TRUE), .groups = "drop"),
+      by = c("clock", "component", "Timepoint")
+    ) %>%
+    mutate(y = y_top + 0.15)
+
+  p_raincloud <- ggplot(delta_data, aes(x = clock_label, y = delta)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_violin(
+      width = 0.8,
+      fill = "grey88",
+      color = "grey55",
+      linewidth = 0.3,
+      trim = FALSE
+    ) +
+    geom_jitter(width = 0.12, height = 0, alpha = 0.55, size = 1) +
+    stat_summary(
+      fun = mean,
+      geom = "crossbar",
+      width = 0.35,
+      fatten = 2,
+      color = "red"
+    ) +
+    geom_text(
+      data = delta_stars,
+      aes(x = clock_label, y = y, label = stars),
+      inherit.aes = FALSE,
+      vjust = 0,
+      size = 4,
+      color = "blue"
+    ) +
+    facet_grid(component ~ Timepoint, scales = "free_y") +
+    theme_bw(base_size = 11) +
+    theme(
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    ) +
+    labs(
+      title = paste0("Raincloud plot: ", title_prefix, " component changes from baseline"),
+      x = NULL,
+      y = "Delta SRAA component from D-1"
+    )
+
+  list(
+    effects = effect_sizes,
+    plot_data = plot_data,
+    delta_data = delta_data,
+    spaghetti = p_spaghetti,
+    raincloud = p_raincloud
+  )
+}
 ```
 
 ```{r decomposition-analysis, fig.width=10, fig.height=6, results='asis'}
@@ -940,78 +1115,147 @@ p_decomposition_raincloud <- ggplot(
 p_decomposition_raincloud
 ```
 
-```{r decomposition-adjusted-vs-unadjusted, fig.width=8, fig.height=5}
-adjusted_vs_unadjusted <- timepoint_effect_sizes %>%
-  select(model, clock, timepoint, effect_size, p_value) %>%
-  pivot_wider(
-    names_from = model,
-    values_from = c(effect_size, p_value)
-  ) %>%
-  mutate(
-    delta_diff =
-      `effect_size_With blood-cell adjustment` -
-      `effect_size_Without blood-cell adjustment`,
-    sig_category = case_when(
-      `p_value_Without blood-cell adjustment` < 0.05 &
-        `p_value_With blood-cell adjustment` < 0.05 ~ "both",
-      `p_value_Without blood-cell adjustment` < 0.05 &
-        `p_value_With blood-cell adjustment` >= 0.05 ~ "unadjusted_only",
-      `p_value_Without blood-cell adjustment` >= 0.05 &
-        `p_value_With blood-cell adjustment` < 0.05 ~ "adjusted_only",
-      TRUE ~ "none"
-    ),
-    sig_category = factor(
-      sig_category,
-      levels = c("both", "unadjusted_only", "adjusted_only", "none")
+```{r adjusted-vs-unadjusted-helpers}
+prepare_adjusted_vs_unadjusted <- function(effect_sizes,
+                                           label_col = "clock") {
+  effect_sizes %>%
+    select(
+      any_of("component_set"),
+      label = all_of(label_col),
+      timepoint,
+      model,
+      effect_size,
+      p_value
+    ) %>%
+    pivot_wider(
+      names_from = model,
+      values_from = c(effect_size, p_value)
+    ) %>%
+    mutate(
+      delta_diff =
+        `effect_size_With blood-cell adjustment` -
+        `effect_size_Without blood-cell adjustment`,
+      sig_category = case_when(
+        `p_value_Without blood-cell adjustment` < 0.05 &
+          `p_value_With blood-cell adjustment` < 0.05 ~ "both",
+        `p_value_Without blood-cell adjustment` < 0.05 &
+          `p_value_With blood-cell adjustment` >= 0.05 ~ "unadjusted_only",
+        `p_value_Without blood-cell adjustment` >= 0.05 &
+          `p_value_With blood-cell adjustment` < 0.05 ~ "adjusted_only",
+        TRUE ~ "none"
+      ),
+      sig_category = factor(
+        sig_category,
+        levels = c("both", "unadjusted_only", "adjusted_only", "none")
+      )
     )
-  )
+}
 
-p_adjusted_vs_unadjusted <- ggplot(
+plot_adjusted_vs_unadjusted <- function(adjusted_vs_unadjusted,
+                                        title,
+                                        facet_by_component_set = FALSE,
+                                        facet_ncol = 2,
+                                        label_size = 2.4,
+                                        point_size = 2.1) {
+  axis_lim <- range(
+    c(
+      adjusted_vs_unadjusted$`effect_size_Without blood-cell adjustment`,
+      adjusted_vs_unadjusted$`effect_size_With blood-cell adjustment`
+    ),
+    na.rm = TRUE
+  )
+  axis_pad <- diff(axis_lim) * 0.08
+  if (!is.finite(axis_pad) || axis_pad == 0) axis_pad <- 0.1
+  axis_lim <- axis_lim + c(-axis_pad, axis_pad)
+
+  p <- ggplot(
+    adjusted_vs_unadjusted,
+    aes(
+      x = `effect_size_Without blood-cell adjustment`,
+      y = `effect_size_With blood-cell adjustment`,
+      label = label,
+      color = delta_diff,
+      shape = sig_category
+    )
+  ) +
+    geom_hline(yintercept = 0, linewidth = 0.3, alpha = 0.5) +
+    geom_vline(xintercept = 0, linewidth = 0.3, alpha = 0.5) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", alpha = 0.6) +
+    geom_point(size = point_size) +
+    geom_text_repel(
+      size = label_size,
+      max.overlaps = Inf,
+      box.padding = 0.12,
+      point.padding = 0.06,
+      min.segment.length = 0,
+      segment.alpha = 0.35
+    ) +
+    scale_color_gradient2(
+      low = "blue",
+      mid = "grey40",
+      high = "red",
+      midpoint = 0,
+      name = expression(Delta[adj] - Delta[unadj]),
+      guide = guide_colorbar(
+        title.position = "top",
+        barheight = unit(4.2, "cm"),
+        barwidth = unit(0.35, "cm")
+      )
+    ) +
+    scale_shape_manual(
+      values = c(
+        "both" = 16,
+        "unadjusted_only" = 17,
+        "adjusted_only" = 15,
+        "none" = 1
+      ),
+      labels = c(
+        "both" = "Both significant",
+        "unadjusted_only" = "Unadjusted only",
+        "adjusted_only" = "Adjusted only",
+        "none" = "Neither significant"
+      ),
+      name = "p < 0.05"
+    ) +
+    coord_equal(xlim = axis_lim, ylim = axis_lim) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "right",
+      legend.box = "vertical",
+      legend.title = element_text(size = 9),
+      legend.text = element_text(size = 8),
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(size = 13),
+      plot.subtitle = element_text(size = 9)
+    ) +
+    labs(
+      title = title,
+      subtitle = "Red: adjusted > unadjusted; blue: adjusted < unadjusted; grey: near zero difference",
+      x = "Unadjusted time effect",
+      y = "Lymphocyte-adjusted time effect"
+    )
+
+  if (facet_by_component_set && "component_set" %in% colnames(adjusted_vs_unadjusted)) {
+    p + facet_grid(component_set ~ timepoint)
+  } else {
+    p + facet_wrap(~timepoint, ncol = facet_ncol)
+  }
+}
+```
+
+```{r decomposition-adjusted-vs-unadjusted, fig.width=11, fig.height=5.5}
+adjusted_vs_unadjusted <- prepare_adjusted_vs_unadjusted(
+  timepoint_effect_sizes,
+  label_col = "clock"
+)
+
+p_adjusted_vs_unadjusted <- plot_adjusted_vs_unadjusted(
   adjusted_vs_unadjusted,
-  aes(
-    x = `effect_size_Without blood-cell adjustment`,
-    y = `effect_size_With blood-cell adjustment`,
-    label = clock,
-    color = delta_diff,
-    shape = sig_category
-  )
-) +
-  geom_hline(yintercept = 0, linewidth = 0.3, alpha = 0.5) +
-  geom_vline(xintercept = 0, linewidth = 0.3, alpha = 0.5) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", alpha = 0.6) +
-  geom_point(size = 2.5) +
-  geom_text_repel(size = 3, max.overlaps = Inf) +
-  scale_color_gradient2(
-    low = "blue",
-    mid = "grey40",
-    high = "red",
-    midpoint = 0,
-    name = expression(Delta * "adjusted - " * Delta * "unadjusted")
-  ) +
-  scale_shape_manual(
-    values = c(
-      "both" = 16,
-      "unadjusted_only" = 17,
-      "adjusted_only" = 15,
-      "none" = 1
-    ),
-    labels = c(
-      "both" = "Both significant",
-      "unadjusted_only" = "Unadjusted only",
-      "adjusted_only" = "Adjusted only",
-      "none" = "Neither significant"
-    ),
-    name = "p < 0.05"
-  ) +
-  facet_wrap(~timepoint) +
-  coord_equal() +
-  theme_minimal(base_size = 12) +
-  labs(
-    title = "Clock time effects before and after lymphocyte adjustment",
-    subtitle = "Warm colors: adjusted > unadjusted; cool colors: adjusted < unadjusted; neutral: near zero difference",
-    x = "Unadjusted time effect",
-    y = "Lymphocyte-adjusted time effect"
-  )
+  title = "Clock time effects before and after lymphocyte adjustment",
+  facet_ncol = 2,
+  label_size = 2.2,
+  point_size = 2.1
+)
 
 p_adjusted_vs_unadjusted
 ```
@@ -1546,6 +1790,10 @@ dev.off()
 pdf("figures/clock_PCA_loadings_PC13.pdf", width = 10, height = 5)
 plot(p_loadings13)
 dev.off()
+
+pdf("figures/adjusted_vs_unadjusted_clock_time_effects.pdf", width = 11, height = 5.5)
+plot(p_adjusted_vs_unadjusted)
+dev.off()
 ```
 
 # Clock Component Analysis
@@ -1652,6 +1900,155 @@ render_table(
   grimage_component_blood_cell_effects,
   caption = "Standardized blood-cell proportion effect sizes for GrimAge component models"
 )
+
+adjusted_vs_unadjusted_pc_grimage <- prepare_adjusted_vs_unadjusted(
+  grimage_component_time_effects %>% filter(component_set == "PCGrimAge"),
+  label_col = "component"
+)
+
+adjusted_vs_unadjusted_grimage1 <- prepare_adjusted_vs_unadjusted(
+  grimage_component_time_effects %>% filter(component_set == "GrimAge"),
+  label_col = "component"
+)
+
+adjusted_vs_unadjusted_grimage2 <- prepare_adjusted_vs_unadjusted(
+  grimage_component_time_effects %>% filter(component_set == "GrimAge v2"),
+  label_col = "component"
+)
+
+p_adjusted_vs_unadjusted_pc_grimage <- plot_adjusted_vs_unadjusted(
+  adjusted_vs_unadjusted_pc_grimage,
+  title = "PCGrimAge component time effects before and after lymphocyte adjustment",
+  facet_ncol = 2,
+  label_size = 2.3,
+  point_size = 2
+)
+
+p_adjusted_vs_unadjusted_grimage1 <- plot_adjusted_vs_unadjusted(
+  adjusted_vs_unadjusted_grimage1,
+  title = "GrimAge component time effects before and after lymphocyte adjustment",
+  facet_ncol = 2,
+  label_size = 2.3,
+  point_size = 2
+)
+
+p_adjusted_vs_unadjusted_grimage2 <- plot_adjusted_vs_unadjusted(
+  adjusted_vs_unadjusted_grimage2,
+  title = "GrimAge v2 component time effects before and after lymphocyte adjustment",
+  facet_ncol = 2,
+  label_size = 2.2,
+  point_size = 2
+)
+```
+
+### GrimAge Component Trajectory Plots
+
+```{r grimage-component-plots-display, fig.width=10, fig.height=6}
+res_pc_grimage$p1 + labs(title = "PCGrimAge SRAA trajectories (composition adjusted)", x = NULL)
+res_pc_grimage$p2 + labs(title = "PCGrimAge within-subject effect sizes (composition adjusted)", x = NULL)
+res_pc_grimage_no_cell$p1 + labs(title = "PCGrimAge SRAA trajectories", x = NULL)
+res_pc_grimage_no_cell$p2 + labs(title = "PCGrimAge within-subject effect sizes", x = NULL)
+
+res1$p1 + labs(title = "GrimAge SRAA trajectories (composition adjusted)", x = NULL)
+res1$p2 + labs(title = "GrimAge within-subject effect sizes (composition adjusted)", x = NULL)
+res1_no_cell$p1 + labs(title = "GrimAge SRAA trajectories", x = NULL)
+res1_no_cell$p2 + labs(title = "GrimAge within-subject effect sizes", x = NULL)
+
+res2$p1 + labs(title = "GrimAge v2 SRAA trajectories (composition adjusted)", x = NULL)
+res2$p2 + labs(title = "GrimAge v2 within-subject effect sizes (composition adjusted)", x = NULL)
+res2_no_cell$p1 + labs(title = "GrimAge v2 SRAA trajectories", x = NULL)
+res2_no_cell$p2 + labs(title = "GrimAge v2 within-subject effect sizes", x = NULL)
+```
+
+### GrimAge Component Adjusted-vs-Unadjusted Plots
+
+```{r grimage-component-adjusted-vs-unadjusted, fig.width=11, fig.height=5.5}
+p_adjusted_vs_unadjusted_pc_grimage
+p_adjusted_vs_unadjusted_grimage1
+p_adjusted_vs_unadjusted_grimage2
+```
+
+### GrimAge Component Decomposition
+
+```{r grimage-component-decomposition, fig.width=10, fig.height=6, results='asis'}
+decomp_pc_grimage <- decompose_clock_composition(
+  res_pc_grimage$data_wide,
+  pc_grimage_cols,
+  cell_covariates = "LYMPHOZYTEN",
+  adjustment_covariates = "Gender"
+)
+
+decomp_grimage1 <- decompose_clock_composition(
+  res1$data_wide,
+  grimage1_cols,
+  cell_covariates = "LYMPHOZYTEN",
+  adjustment_covariates = "Gender"
+)
+
+decomp_grimage2 <- decompose_clock_composition(
+  res2$data_wide,
+  grimage2_cols,
+  cell_covariates = "LYMPHOZYTEN",
+  adjustment_covariates = "Gender"
+)
+
+decomp_pc_grimage_outputs <- prepare_decomposition_outputs(
+  decomp_pc_grimage,
+  pc_grimage_cols,
+  title_prefix = "PCGrimAge"
+)
+
+decomp_grimage1_outputs <- prepare_decomposition_outputs(
+  decomp_grimage1,
+  grimage1_cols,
+  prefix_patterns = "GrimAge",
+  title_prefix = "GrimAge"
+)
+
+decomp_grimage2_outputs <- prepare_decomposition_outputs(
+  decomp_grimage2,
+  grimage2_cols,
+  prefix_patterns = "GrimAge2",
+  title_prefix = "GrimAge v2"
+)
+
+grimage_component_decomposition_effects <- bind_rows(
+  decomp_pc_grimage_outputs$effects %>% mutate(component_set = "PCGrimAge"),
+  decomp_grimage1_outputs$effects %>% mutate(component_set = "GrimAge"),
+  decomp_grimage2_outputs$effects %>% mutate(component_set = "GrimAge v2")
+) %>%
+  transmute(
+    component_set,
+    component_name = clock_label,
+    decomposition_component = component,
+    timepoint,
+    effect_size,
+    lower_95,
+    upper_95,
+    SE,
+    df,
+    p_value
+  ) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+render_table(
+  grimage_component_decomposition_effects,
+  caption = "GrimAge component decomposition timepoint effects"
+)
+```
+
+```{r grimage-component-decomposition-plots, fig.width=10, fig.height=6}
+decomp_pc_grimage_outputs$spaghetti
+decomp_pc_grimage_outputs$raincloud
+
+decomp_grimage1_outputs$spaghetti
+decomp_grimage1_outputs$raincloud
+
+decomp_grimage2_outputs$spaghetti
+decomp_grimage2_outputs$raincloud
 ```
 
 ### GrimAge Component Plots
@@ -1660,9 +2057,9 @@ render_table(
 # Supplementary Figure 4-3: GrimAge components
 grDevices::cairo_pdf("figures/SFig4-3.pdf", width = 8.5, height = 10)
 plot_grid(
-  res_pc_grimage$p2 + labs(title = "PCGrimAge", x = NULL),
-  res1$p2 + labs(title = "GrimAge", x = NULL),
-  res2$p2 + labs(title = "GrimAge v2", x = NULL),
+  res_pc_grimage$p2 + labs(title = "PCGrimAge (composition adjusted)", x = NULL),
+  res1$p2 + labs(title = "GrimAge (composition adjusted)", x = NULL),
+  res2$p2 + labs(title = "GrimAge v2 (composition adjusted)", x = NULL),
   labels = c("a", "b", "c"), label_size = 20, ncol = 1, rel_heights = c(1, 1, 1)
 )
 dev.off()
@@ -1670,11 +2067,48 @@ dev.off()
 # Supplementary Figure 4-3 variant: no neutrophil/lymphocyte adjustment
 grDevices::cairo_pdf("figures/SFig4-3_no_blood_cell_adjustment.pdf", width = 8.5, height = 10)
 plot_grid(
-  res_pc_grimage_no_cell$p2 + labs(title = "PCGrimAge (no blood-cell adjustment)", x = NULL),
-  res1_no_cell$p2 + labs(title = "GrimAge (no blood-cell adjustment)", x = NULL),
-  res2_no_cell$p2 + labs(title = "GrimAge v2 (no blood-cell adjustment)", x = NULL),
+  res_pc_grimage_no_cell$p2 + labs(title = "PCGrimAge", x = NULL),
+  res1_no_cell$p2 + labs(title = "GrimAge", x = NULL),
+  res2_no_cell$p2 + labs(title = "GrimAge v2", x = NULL),
   labels = c("a", "b", "c"), label_size = 20, ncol = 1, rel_heights = c(1, 1, 1)
 )
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-3_PCGrimAge_adjusted_vs_unadjusted.pdf", width = 11, height = 5.5)
+print(p_adjusted_vs_unadjusted_pc_grimage)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-3_GrimAge_adjusted_vs_unadjusted.pdf", width = 11, height = 5.5)
+print(p_adjusted_vs_unadjusted_grimage1)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-3_GrimAge2_adjusted_vs_unadjusted.pdf", width = 11, height = 5.5)
+print(p_adjusted_vs_unadjusted_grimage2)
+dev.off()
+
+# GrimAge component decomposition figures
+grDevices::cairo_pdf("figures/SFig4-3_PCGrimAge_decomposition_spaghetti.pdf", width = 10, height = 5.5)
+print(decomp_pc_grimage_outputs$spaghetti)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-3_PCGrimAge_decomposition_raincloud.pdf", width = 10, height = 5.5)
+print(decomp_pc_grimage_outputs$raincloud)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-3_GrimAge_decomposition_spaghetti.pdf", width = 10, height = 5.5)
+print(decomp_grimage1_outputs$spaghetti)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-3_GrimAge_decomposition_raincloud.pdf", width = 10, height = 5.5)
+print(decomp_grimage1_outputs$raincloud)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-3_GrimAge2_decomposition_spaghetti.pdf", width = 11, height = 5.5)
+print(decomp_grimage2_outputs$spaghetti)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-3_GrimAge2_decomposition_raincloud.pdf", width = 11, height = 5.5)
+print(decomp_grimage2_outputs$raincloud)
 dev.off()
 ```
 
@@ -1688,9 +2122,6 @@ systemsage_cols <- c(
 
 ress <- main(df_age, systemsage_cols, covariates = c("Gender", "LYMPHOZYTEN"))
 ress_no_cell <- main(df_age, systemsage_cols, covariates = "Gender")
-
-ress$p2
-ress_no_cell$p2 + labs(title = "SystemsAge (no blood-cell adjustment)", x = NULL)
 ```
 
 ### SystemsAge Component Effect Sizes
@@ -1727,6 +2158,77 @@ render_table(
   systemsage_component_blood_cell_effects,
   caption = "Standardized blood-cell proportion effect sizes for SystemsAge component models"
 )
+
+adjusted_vs_unadjusted_systemsage <- prepare_adjusted_vs_unadjusted(
+  systemsage_component_time_effects,
+  label_col = "component"
+)
+
+p_adjusted_vs_unadjusted_systemsage <- plot_adjusted_vs_unadjusted(
+  adjusted_vs_unadjusted_systemsage,
+  title = "SystemsAge component time effects before and after lymphocyte adjustment",
+  facet_ncol = 2,
+  label_size = 2.1,
+  point_size = 2
+)
+```
+
+### SystemsAge Component Trajectory Plots
+
+```{r systemsage-component-plots-display, fig.width=10, fig.height=6}
+ress$p1 + labs(title = "SystemsAge SRAA trajectories (composition adjusted)", x = NULL)
+ress$p2 + labs(title = "SystemsAge within-subject effect sizes (composition adjusted)", x = NULL)
+ress_no_cell$p1 + labs(title = "SystemsAge SRAA trajectories", x = NULL)
+ress_no_cell$p2 + labs(title = "SystemsAge within-subject effect sizes", x = NULL)
+```
+
+### SystemsAge Component Adjusted-vs-Unadjusted Plot
+
+```{r systemsage-component-adjusted-vs-unadjusted, fig.width=11, fig.height=5.5}
+p_adjusted_vs_unadjusted_systemsage
+```
+
+### SystemsAge Component Decomposition
+
+```{r systemsage-component-decomposition, fig.width=11, fig.height=6, results='asis'}
+decomp_systemsage <- decompose_clock_composition(
+  ress$data_wide,
+  systemsage_cols,
+  cell_covariates = "LYMPHOZYTEN",
+  adjustment_covariates = "Gender"
+)
+
+decomp_systemsage_outputs <- prepare_decomposition_outputs(
+  decomp_systemsage,
+  systemsage_cols,
+  title_prefix = "SystemsAge"
+)
+
+systemsage_component_decomposition_effects <- decomp_systemsage_outputs$effects %>%
+  transmute(
+    component_set = "SystemsAge",
+    component_name = clock_label,
+    decomposition_component = component,
+    timepoint,
+    effect_size,
+    lower_95,
+    upper_95,
+    SE,
+    df,
+    p_value
+  ) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+render_table(
+  systemsage_component_decomposition_effects,
+  caption = "SystemsAge component decomposition timepoint effects"
+)
+
+decomp_systemsage_outputs$spaghetti
+decomp_systemsage_outputs$raincloud
 ```
 
 ### SystemsAge Component Plots
@@ -1734,12 +2236,24 @@ render_table(
 ```{r save-systemsage-figure}
 # Supplementary Figure 4-4: SystemsAge components
 grDevices::cairo_pdf("figures/SFig4-4.pdf", width = 8.5, height = 4)
-print(ress$p2 + labs(title = "SystemsAge", x = NULL))
+print(ress$p2 + labs(title = "SystemsAge (composition adjusted)", x = NULL))
 dev.off()
 
 # Supplementary Figure 4-4 variant: no neutrophil/lymphocyte adjustment
 grDevices::cairo_pdf("figures/SFig4-4_no_blood_cell_adjustment.pdf", width = 8.5, height = 4)
-print(ress_no_cell$p2 + labs(title = "SystemsAge (no blood-cell adjustment)", x = NULL))
+print(ress_no_cell$p2 + labs(title = "SystemsAge", x = NULL))
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-4_adjusted_vs_unadjusted.pdf", width = 11, height = 5.5)
+print(p_adjusted_vs_unadjusted_systemsage)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-4_decomposition_spaghetti.pdf", width = 11, height = 5.5)
+print(decomp_systemsage_outputs$spaghetti)
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-4_decomposition_raincloud.pdf", width = 11, height = 5.5)
+print(decomp_systemsage_outputs$raincloud)
 dev.off()
 ```
 
@@ -1753,6 +2267,7 @@ plots <- list(
   p_spaghetti = main_res$p1,
   p_raincloud = main_res$p2,
   p_raincloud_no_cell_adjustment = main_res_no_cell$p2,
+  p_adjusted_vs_unadjusted = p_adjusted_vs_unadjusted,
   main_effects = main_res$effects,
   main_effects_no_cell_adjustment = main_res_no_cell$effects,
   p_dam_D10 = p_dam1,
@@ -1769,8 +2284,18 @@ plots <- list(
   res_SystemsAge_no_cell_adjustment = ress_no_cell,
   grimage_component_time_effects = grimage_component_time_effects,
   grimage_component_blood_cell_effects = grimage_component_blood_cell_effects,
+  p_adjusted_vs_unadjusted_PCGrimAge = p_adjusted_vs_unadjusted_pc_grimage,
+  p_adjusted_vs_unadjusted_GrimAge = p_adjusted_vs_unadjusted_grimage1,
+  p_adjusted_vs_unadjusted_GrimAge2 = p_adjusted_vs_unadjusted_grimage2,
+  grimage_component_decomposition_effects = grimage_component_decomposition_effects,
+  decomp_PCGrimAge = decomp_pc_grimage_outputs,
+  decomp_GrimAge = decomp_grimage1_outputs,
+  decomp_GrimAge2 = decomp_grimage2_outputs,
   systemsage_component_time_effects = systemsage_component_time_effects,
   systemsage_component_blood_cell_effects = systemsage_component_blood_cell_effects,
+  p_adjusted_vs_unadjusted_SystemsAge = p_adjusted_vs_unadjusted_systemsage,
+  systemsage_component_decomposition_effects = systemsage_component_decomposition_effects,
+  decomp_SystemsAge = decomp_systemsage_outputs,
   assoc_results = assoc_results
 )
 saveRDS(plots, file = "figures/epiAge_plots.rds")
