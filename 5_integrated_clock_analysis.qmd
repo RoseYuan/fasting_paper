@@ -52,6 +52,29 @@ library(lmerTest)
 library(writexl)
 ```
 
+```{r table-helpers}
+render_table <- function(x, caption = NULL, digits = 3) {
+  if (is.null(x) || nrow(x) == 0) {
+    cat("_No rows to display._\n")
+    return(invisible(NULL))
+  }
+
+  knitr::kable(x, digits = digits, caption = caption, format = "html")
+}
+
+arrange_adjustment_pairs <- function(df, group_cols, adjustment_col = "model") {
+  adjustment_levels <- c(
+    "With blood-cell adjustment",
+    "Without blood-cell adjustment"
+  )
+
+  df %>%
+    mutate(.adjustment_order = match(.data[[adjustment_col]], adjustment_levels)) %>%
+    arrange(!!!rlang::syms(group_cols), .adjustment_order, .data[[adjustment_col]]) %>%
+    select(-.adjustment_order)
+}
+```
+
 ```{r load-data}
 devtools::load_all("~/public/SiyuanLuo/projects/LongAge")
 
@@ -121,12 +144,16 @@ vars_subject <- c(
 ```{r main-function}
 main <- function(df_age, clock_cols, 
                  remove_prefix = FALSE, 
-                 prefix_patterns = NULL) {
+                 prefix_patterns = NULL,
+                 covariates = c("Gender")) {
   clock_cols_RAA <- paste0(clock_cols, "_RAA")
   clock_cols_RAA_z_base <- paste0(clock_cols_RAA, "_z_base")
   clock_cols_RAA_z_base_delta <- paste0(clock_cols_RAA_z_base, "_delta")
   
-  res <- CalResidAgeAccel(df_age, clock_cols=clock_cols, age_col = "Age")
+  res <- NULL
+  invisible(capture.output(
+    res <- CalResidAgeAccel(df_age, clock_cols=clock_cols, age_col = "Age")
+  ))
   data_wide <- res$data_wide
   data_wide <- scale_by_baseline_sd(data_wide, vars=clock_cols_RAA, time_col = "Timepoint", baseline_label = "D-1",suffix = "z_base")
     
@@ -139,7 +166,7 @@ main <- function(df_age, clock_cols,
                               var_cols=clock_cols_RAA_z_base,
                               time_var        = "Timepoint",
                               baseline_label  = "D-1",
-                              covariates      = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"),
+                              covariates      = covariates,
                               random_re       = "(1|ID)",
                               ci_level        = 0.95,
                               REML            = TRUE)
@@ -194,28 +221,225 @@ main <- function(df_age, clock_cols,
                        title="Within-subject effect sizes (baseline SD units)",
                        subtitle = NULL)
                        # subtitle="Standardized residual age acceleration (SRAA) change from baseline. \nStars from mixed-model contrasts vs baseline")
-  return(list(p1=p1, p2=p2, data_wide=data_wide))
+  return(list(p1=p1, p2=p2, data_wide=data_wide, effects=res$effects, covariates=covariates))
+}
+```
+
+```{r effect-size-helpers}
+format_time_effects <- function(effects, model_label) {
+  effects %>%
+    mutate(
+      clock = str_remove(variable, "_RAA_z_base$"),
+      timepoint = str_match(contrast, "\\(([^)]+)\\)")[, 2],
+      model = model_label
+    ) %>%
+    transmute(
+      model,
+      clock,
+      timepoint,
+      effect_size = estimate,
+      lower_95 = lower,
+      upper_95 = upper,
+      SE,
+      df,
+      p_value = p
+    )
+}
+
+extract_blood_cell_effects <- function(data_wide,
+                                       clock_cols,
+                                       cell_covariates = c("NEUTROPHILE", "LYMPHOZYTEN"),
+                                       adjustment_covariates = "Gender",
+                                       time_var = "Timepoint",
+                                       baseline_label = "D-1",
+                                       random_re = "(1|ID)",
+                                       ci_level = 0.95,
+                                       REML = TRUE) {
+  clock_cols_RAA_z_base <- paste0(clock_cols, "_RAA_z_base")
+  cell_covariates_z <- paste0(cell_covariates, "_z")
+
+  df_model <- data_wide %>%
+    mutate(
+      across(
+        all_of(cell_covariates),
+        ~ as.numeric(scale(.x)),
+        .names = "{.col}_z"
+      )
+    )
+
+  bind_rows(lapply(clock_cols_RAA_z_base, function(var_name) {
+    rhs_terms <- c(time_var, adjustment_covariates, cell_covariates_z)
+    form_txt <- sprintf("%s ~ %s + %s", var_name, paste(rhs_terms, collapse = " + "), random_re)
+    need_vars <- unique(c(var_name, time_var, "ID", adjustment_covariates, cell_covariates_z))
+
+    dat <- df_model %>%
+      select(all_of(need_vars)) %>%
+      drop_na()
+
+    if (nrow(dat) < 5) return(NULL)
+
+    dat[[time_var]] <- relevel(factor(dat[[time_var]]), ref = baseline_label)
+    fit <- lmer(as.formula(form_txt), data = dat, REML = REML)
+
+    coef_df <- as.data.frame(coef(summary(fit))) %>%
+      rownames_to_column("term") %>%
+      filter(term %in% cell_covariates_z) %>%
+      as_tibble()
+
+    names(coef_df) <- make.names(names(coef_df))
+    ci_df <- as.data.frame(confint(fit, parm = cell_covariates_z, method = "Wald", level = ci_level)) %>%
+      rownames_to_column("term") %>%
+      as_tibble()
+    names(ci_df) <- c("term", "lower_95", "upper_95")
+
+    coef_df %>%
+      left_join(ci_df, by = "term") %>%
+      transmute(
+        clock = str_remove(var_name, "_RAA_z_base$"),
+        term = str_remove(term, "_z$"),
+        effect_size = Estimate,
+        lower_95,
+        upper_95,
+        SE = Std..Error,
+        df = NA_real_,
+        p_value = 2 * pnorm(abs(t.value), lower.tail = FALSE)
+      )
+  }))
+}
+
+format_component_time_effects <- function(adjusted_res,
+                                          no_cell_res,
+                                          component_set,
+                                          prefix_patterns = NULL) {
+  bind_rows(
+    format_time_effects(adjusted_res$effects, "With blood-cell adjustment"),
+    format_time_effects(no_cell_res$effects, "Without blood-cell adjustment")
+  ) %>%
+    mutate(
+      component_set = component_set,
+      component = clock
+    ) %>%
+    {
+      out <- .
+      if (!is.null(prefix_patterns)) {
+        for (pattern in prefix_patterns) {
+          out$component <- str_remove(out$component, paste0("^", pattern))
+        }
+      }
+      out
+    } %>%
+    transmute(
+      component_set,
+      model,
+      component,
+      timepoint,
+      effect_size,
+      lower_95,
+      upper_95,
+      SE,
+      df,
+      p_value
+    )
+}
+
+format_component_blood_cell_effects <- function(adjusted_res,
+                                                clock_cols,
+                                                component_set,
+                                                prefix_patterns = NULL) {
+  extract_blood_cell_effects(adjusted_res$data_wide, clock_cols) %>%
+    mutate(
+      component_set = component_set,
+      component = clock
+    ) %>%
+    {
+      out <- .
+      if (!is.null(prefix_patterns)) {
+        for (pattern in prefix_patterns) {
+          out$component <- str_remove(out$component, paste0("^", pattern))
+        }
+      }
+      out
+    } %>%
+    transmute(
+      component_set,
+      component,
+      term,
+      effect_size,
+      lower_95,
+      upper_95,
+      SE,
+      df,
+      p_value
+    )
 }
 ```
 
 ```{r run-main-analysis, fig.width=10, fig.height=6}
 # Run main analysis pipeline
-res <- main(df_age, clock_cols)
-data_wide <- res$data_wide
+main_res <- main(df_age, clock_cols, covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+main_res_no_cell <- main(df_age, clock_cols, covariates = "Gender")
+data_wide <- main_res$data_wide
 
 # Display plots
-res$p1
-res$p2
+main_res$p1 + labs(title = "Standardized residual age acceleration (baseline re-centered, composition adjusted)")
+main_res$p2 + labs(title = "Within-subject effect sizes (baseline SD units, composition adjusted)")
+main_res_no_cell$p1
+main_res_no_cell$p2
+```
+
+## Timepoint and Blood-Cell Effect Sizes
+
+Effect sizes are in baseline-SD units of residual age acceleration. Timepoint
+effects are mixed-model contrasts versus D-1. Blood-cell effects are fixed-effect
+coefficients from the blood-cell-adjusted model after standardizing each blood
+cell proportion, so each estimate is the expected SRAA difference per 1 SD
+higher neutrophil or lymphocyte proportion.
+
+```{r timepoint-blood-cell-effect-sizes, results='asis'}
+timepoint_effect_sizes <- bind_rows(
+  format_time_effects(main_res$effects, "With blood-cell adjustment"),
+  format_time_effects(main_res_no_cell$effects, "Without blood-cell adjustment")
+) %>%
+  arrange_adjustment_pairs(group_cols = c("clock", "timepoint")) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+blood_cell_effect_sizes <- extract_blood_cell_effects(data_wide, clock_cols) %>%
+  arrange(clock, term) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+render_table(
+  timepoint_effect_sizes,
+  caption = "Timepoint effect sizes with and without blood-cell adjustment"
+)
+
+render_table(
+  blood_cell_effect_sizes,
+  caption = "Standardized blood-cell proportion effect sizes in the adjusted models"
+)
 ```
 
 ```{r save-main-plots}
 # Save individual plots
-pdf("figures/spaghetti.pdf", width = 8, height = 5)
-plot(res$p1)
+pdf("figures/spaghetti_with_blood_cell_adjustment.pdf", width = 8, height = 5)
+plot(main_res$p1+ labs(title = "Standardized residual age acceleration (baseline re-centered, composition adjusted)"))
 dev.off()
 
-pdf("figures/raincloud.pdf", width = 8, height = 5)
-plot(res$p2)
+pdf("figures/raincloud_with_blood_cell_adjustment.pdf", width = 8, height = 5)
+plot(main_res$p2 + labs(title = "Within-subject effect sizes (baseline SD units, composition adjusted)"))
+dev.off()
+
+pdf("figures/spaghetti_no_blood_cell_adjustment.pdf", width = 8, height = 5)
+plot(main_res_no_cell$p1)
+dev.off()
+
+pdf("figures/raincloud_no_blood_cell_adjustment.pdf", width = 8, height = 5)
+plot(main_res_no_cell$p2)
 dev.off()
 ```
 
@@ -471,7 +695,14 @@ assoc_results <- bind_rows(
   run_assoc_for_timepoint(df_assoc, "M+1",  "PC3")
 )
 
-assoc_results %>% filter(p_adj < 0.05)
+render_table(
+  assoc_results %>%
+    filter(p_adj < 0.05) %>%
+    mutate(
+      across(c(rho, p_value, p_adj), ~ signif(.x, 3))
+    ),
+  caption = "PC-clinical associations passing BH-adjusted p < 0.05"
+)
 ```
 
 ## Association between DamAge/AdaptAge and glucose, Insulin and Homa
@@ -577,8 +808,11 @@ data_long <- data_assoc %>%
 ```
 
 ```{r}
-facet_stats(data_long, "DamAge_RAA_z_base_delta")
-facet_stats(data_long, "AdaptAge_RAA_z_base_delta")
+dam_stats_d10 <- facet_stats(data_long, "DamAge_RAA_z_base_delta")
+adapt_stats_d10 <- facet_stats(data_long, "AdaptAge_RAA_z_base_delta")
+
+render_table(dam_stats_d10, caption = "D+10 DamAge metabolic association statistics")
+render_table(adapt_stats_d10, caption = "D+10 AdaptAge metabolic association statistics")
 
 # 5) Produce the two figures
 p_dam1 <- plot_metabolic_assoc(
@@ -644,8 +878,11 @@ data_long <- data_assoc %>%
 ```
 
 ```{r}
-facet_stats(data_long, "DamAge_RAA_z_base_delta")
-facet_stats(data_long, "AdaptAge_RAA_z_base_delta")
+dam_stats_m1 <- facet_stats(data_long, "DamAge_RAA_z_base_delta")
+adapt_stats_m1 <- facet_stats(data_long, "AdaptAge_RAA_z_base_delta")
+
+render_table(dam_stats_m1, caption = "M+1 DamAge metabolic association statistics")
+render_table(adapt_stats_m1, caption = "M+1 AdaptAge metabolic association statistics")
 
 # 5) Produce the two figures
 p_dam2 <- plot_metabolic_assoc(
@@ -666,12 +903,13 @@ p_dam2
 p_adapt2
 ```
 
+# Figure Saving
 
 ```{r save-main-figures}
 # Figure 4: Main analysis
-grDevices::cairo_pdf("figures/Fig4.pdf", width = 7.8, height = 8.2)
+grDevices::cairo_pdf("figures/Fig4_with_blood_cell_adjustment.pdf", width = 7.8, height = 8.2)
 plot_grid(
-  res$p2 + labs(x = ""),
+  main_res$p2 + labs(x = ""),
   p_loadings12 + theme(
     plot.margin = margin(t = 1, r = 1, b = 1, l = 1, unit = "pt"),
     legend.margin = margin(0, 0, 0, 0, "pt"),
@@ -682,10 +920,21 @@ plot_grid(
 )
 dev.off()
 
+# Figure 4 panel a variant: no neutrophil/lymphocyte adjustment
+grDevices::cairo_pdf("figures/Fig4_panel_a_no_blood_cell_adjustment.pdf", width = 7.8, height = 4)
+print(
+  main_res_no_cell$p2 +
+    labs(
+      x = "",
+      title = "Within-subject effect sizes (no blood-cell adjustment)"
+    )
+)
+dev.off()
+
 # Supplementary Figure 4-1
 grDevices::cairo_pdf("figures/SFig4-1.pdf", width = 9, height = 9)
 plot_grid(
-  res$p1 + labs(x = ""),
+  main_res$p1 + labs(x = ""),
   p_loadings13 + theme(
     plot.margin = margin(t = 1, r = 1, b = 1, l = 1, unit = "pt"),
     legend.margin = margin(0, 0, 0, 0, "pt"),
@@ -736,7 +985,8 @@ pc_grimage_cols <- c(
   "PCPACKYRS", "PCADM", "PCB2M", "PCCystatinC",
   "PCGDF15", "PCLeptin", "PCPAI1", "PCTIMP1"
 )
-res <- main(df_age, pc_grimage_cols)
+res_pc_grimage <- main(df_age, pc_grimage_cols, covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+res_pc_grimage_no_cell <- main(df_age, pc_grimage_cols, covariates = "Gender")
 
 # GrimAge v1 components
 grimage1_cols <- paste0("GrimAge", c(
@@ -745,7 +995,12 @@ grimage1_cols <- paste0("GrimAge", c(
 # GrimAge v1 - remove "GrimAge" prefix
 res1 <- main(df_age, grimage1_cols, 
              remove_prefix = TRUE, 
-             prefix_patterns = "GrimAge")
+             prefix_patterns = "GrimAge", 
+             covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+res1_no_cell <- main(df_age, grimage1_cols, 
+                     remove_prefix = TRUE, 
+                     prefix_patterns = "GrimAge",
+                     covariates = "Gender")
 
 # GrimAge v2 components
 grimage2_cols <- paste0("GrimAge2", c(
@@ -754,16 +1009,97 @@ grimage2_cols <- paste0("GrimAge2", c(
   "DNAmlogCRP", "DNAmlogA1C"))
 res2 <- main(df_age, grimage2_cols, 
              remove_prefix = TRUE, 
-             prefix_patterns = "GrimAge2")
+             prefix_patterns = "GrimAge2", 
+             covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+res2_no_cell <- main(df_age, grimage2_cols, 
+                     remove_prefix = TRUE, 
+                     prefix_patterns = "GrimAge2",
+                     covariates = "Gender")
 ```
+
+### GrimAge Component Effect Sizes
+
+```{r grimage-component-effect-sizes, results='asis'}
+grimage_component_time_effects <- bind_rows(
+  format_component_time_effects(
+    res_pc_grimage,
+    res_pc_grimage_no_cell,
+    component_set = "PCGrimAge"
+  ),
+  format_component_time_effects(
+    res1,
+    res1_no_cell,
+    component_set = "GrimAge",
+    prefix_patterns = "GrimAge"
+  ),
+  format_component_time_effects(
+    res2,
+    res2_no_cell,
+    component_set = "GrimAge v2",
+    prefix_patterns = "GrimAge2"
+  )
+) %>%
+  arrange_adjustment_pairs(group_cols = c("component_set", "component", "timepoint")) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+grimage_component_blood_cell_effects <- bind_rows(
+  format_component_blood_cell_effects(
+    res_pc_grimage,
+    pc_grimage_cols,
+    component_set = "PCGrimAge"
+  ),
+  format_component_blood_cell_effects(
+    res1,
+    grimage1_cols,
+    component_set = "GrimAge",
+    prefix_patterns = "GrimAge"
+  ),
+  format_component_blood_cell_effects(
+    res2,
+    grimage2_cols,
+    component_set = "GrimAge v2",
+    prefix_patterns = "GrimAge2"
+  )
+) %>%
+  arrange(component_set, component, term) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+render_table(
+  grimage_component_time_effects,
+  caption = "GrimAge component timepoint effect sizes with and without blood-cell adjustment"
+)
+
+render_table(
+  grimage_component_blood_cell_effects,
+  caption = "Standardized blood-cell proportion effect sizes for GrimAge component models"
+)
+```
+
+### GrimAge Component Plots
 
 ```{r save-component-figures}
 # Supplementary Figure 4-3: GrimAge components
 grDevices::cairo_pdf("figures/SFig4-3.pdf", width = 8.5, height = 10)
 plot_grid(
-  res$p2 + labs(title = "PCGrimAge", x = NULL),
+  res_pc_grimage$p2 + labs(title = "PCGrimAge", x = NULL),
   res1$p2 + labs(title = "GrimAge", x = NULL),
   res2$p2 + labs(title = "GrimAge v2", x = NULL),
+  labels = c("a", "b", "c"), label_size = 20, ncol = 1, rel_heights = c(1, 1, 1)
+)
+dev.off()
+
+# Supplementary Figure 4-3 variant: no neutrophil/lymphocyte adjustment
+grDevices::cairo_pdf("figures/SFig4-3_no_blood_cell_adjustment.pdf", width = 8.5, height = 10)
+plot_grid(
+  res_pc_grimage_no_cell$p2 + labs(title = "PCGrimAge (no blood-cell adjustment)", x = NULL),
+  res1_no_cell$p2 + labs(title = "GrimAge (no blood-cell adjustment)", x = NULL),
+  res2_no_cell$p2 + labs(title = "GrimAge v2 (no blood-cell adjustment)", x = NULL),
   labels = c("a", "b", "c"), label_size = 20, ncol = 1, rel_heights = c(1, 1, 1)
 )
 dev.off()
@@ -777,15 +1113,60 @@ systemsage_cols <- c(
   "Immune", "Kidney", "Liver", "Metabolic", "Lung", "MusculoSkeletal"
 )
 
-ress <- main(df_age, systemsage_cols)
+ress <- main(df_age, systemsage_cols, covariates = c("Gender", "NEUTROPHILE", "LYMPHOZYTEN"))
+ress_no_cell <- main(df_age, systemsage_cols, covariates = "Gender")
 
 ress$p2
+ress_no_cell$p2 + labs(title = "SystemsAge (no blood-cell adjustment)", x = NULL)
 ```
+
+### SystemsAge Component Effect Sizes
+
+```{r systemsage-component-effect-sizes, results='asis'}
+systemsage_component_time_effects <- format_component_time_effects(
+  ress,
+  ress_no_cell,
+  component_set = "SystemsAge"
+) %>%
+  arrange_adjustment_pairs(group_cols = c("component_set", "component", "timepoint")) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+systemsage_component_blood_cell_effects <- format_component_blood_cell_effects(
+  ress,
+  systemsage_cols,
+  component_set = "SystemsAge"
+) %>%
+  arrange(component_set, component, term) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+render_table(
+  systemsage_component_time_effects,
+  caption = "SystemsAge component timepoint effect sizes with and without blood-cell adjustment"
+)
+
+render_table(
+  systemsage_component_blood_cell_effects,
+  caption = "Standardized blood-cell proportion effect sizes for SystemsAge component models"
+)
+```
+
+### SystemsAge Component Plots
 
 ```{r save-systemsage-figure}
 # Supplementary Figure 4-4: SystemsAge components
 grDevices::cairo_pdf("figures/SFig4-4.pdf", width = 8.5, height = 4)
 print(ress$p2 + labs(title = "SystemsAge", x = NULL))
+dev.off()
+
+# Supplementary Figure 4-4 variant: no neutrophil/lymphocyte adjustment
+grDevices::cairo_pdf("figures/SFig4-4_no_blood_cell_adjustment.pdf", width = 8.5, height = 4)
+print(ress_no_cell$p2 + labs(title = "SystemsAge (no blood-cell adjustment)", x = NULL))
 dev.off()
 ```
 
@@ -796,14 +1177,27 @@ dev.off()
 plots <- list(
   p_loadings12 = p_loadings12,
   p_loadings13 = p_loadings13,
-  p_spaghetti = res$p1,
-  p_raincloud = res$p2,
-  p_dam = p_dam,
-  p_adapt = p_adapt,
+  p_spaghetti = main_res$p1,
+  p_raincloud = main_res$p2,
+  p_raincloud_no_cell_adjustment = main_res_no_cell$p2,
+  main_effects = main_res$effects,
+  main_effects_no_cell_adjustment = main_res_no_cell$effects,
+  p_dam_D10 = p_dam1,
+  p_adapt_D10 = p_adapt1,
+  p_dam_M1 = p_dam2,
+  p_adapt_M1 = p_adapt2,
   res_GrimAge = res1,
+  res_GrimAge_no_cell_adjustment = res1_no_cell,
   res_GrimAge2 = res2,
-  res_PCGrimAge = res,
+  res_GrimAge2_no_cell_adjustment = res2_no_cell,
+  res_PCGrimAge = res_pc_grimage,
+  res_PCGrimAge_no_cell_adjustment = res_pc_grimage_no_cell,
   res_SystemsAge = ress,
+  res_SystemsAge_no_cell_adjustment = ress_no_cell,
+  grimage_component_time_effects = grimage_component_time_effects,
+  grimage_component_blood_cell_effects = grimage_component_blood_cell_effects,
+  systemsage_component_time_effects = systemsage_component_time_effects,
+  systemsage_component_blood_cell_effects = systemsage_component_blood_cell_effects,
   assoc_results = assoc_results
 )
 saveRDS(plots, file = "figures/epiAge_plots.rds")
