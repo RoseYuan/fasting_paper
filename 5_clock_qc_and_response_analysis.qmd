@@ -9,8 +9,8 @@ abstract: |
   of predicted epigenetic age versus chronological age using mixed models with
   participant random intercepts. It then tests and visualizes associations
   between each RAA measure and maximum weight-loss percentage using linear mixed
-  models adjusted for sex, timepoint, neutrophil proportion, lymphocyte
-  proportion, and participant ID. Outputs include combined PDFs for clock-vs-age
+  models adjusted for sex, timepoint, lymphocyte proportion, baseline BMI where
+  specified, and participant ID. Outputs include combined PDFs for clock-vs-age
   plots, all RAA-weight-loss plots, and a selected RAA subset.
 format:
   html:
@@ -33,7 +33,9 @@ library(patchwork)
 library(tidyr)
 library(readr)
 library(dplyr)
+library(purrr)
 library(lme4)
+library(lmerTest)
 library(ggeffects)
 source("utils.R")
 ```
@@ -48,9 +50,18 @@ meta <- read_csv("data/meta_3timepoints.csv")
 
 df_age <- df_age %>%
   left_join(meta %>% select(Sample, ID, Timepoint,
-                            NEUTROPHILE, LYMPHOZYTEN, max_weight_loss_perc), 
+                            LYMPHOZYTEN, max_weight_loss_perc, BMI), 
             by = "Sample") %>%
-  mutate(Timepoint = factor(Timepoint, levels = c("D-1", "D+10", "M+1")))
+  mutate(Timepoint = factor(Timepoint, levels = c("D-1", "D+10", "M+1"))) %>%
+  group_by(ID) %>%
+  mutate(
+    baseline_BMI = if (any(Timepoint == "D-1" & !is.na(BMI))) {
+      dplyr::first(BMI[Timepoint == "D-1" & !is.na(BMI)])
+    } else {
+      NA_real_
+    }
+  ) %>%
+  ungroup()
 
 # Define clocks to visualize
 clocks_config <- list(
@@ -92,53 +103,6 @@ df_age_accel <- CalResidAgeAccel(df_age, clock_cols=ageaccel_clocks, age_col = "
 # Visualization functions
 
 ```{r plot-function}
-# Plot epigenetic age against chronological age
-plot_against_age_lm <- function(df, col_name, title_name, age_col = "Age") {
-  model <- lm(as.formula(paste(col_name, "~", age_col, "+ Timepoint")), data = df)
-  r2 <- summary(model)$r.squared
-  r2_label <- paste0("R² = ", round(r2, 3))
-  
-  p <- df %>%
-    ggplot(aes(x = .data[[age_col]], y = .data[[col_name]], color = Timepoint)) +
-    geom_point(size = 2, alpha = 0.7) +
-    # scale_color_manual(values = patient_colors, drop = FALSE) +
-    # ylim(0, NA) +
-    # xlim(0, NA) +
-    annotate(
-      "text",
-      x = Inf, y = Inf,
-      label = r2_label,
-      hjust = 1.1, vjust = 1.5,
-      size = 4.5, color = "black"
-    ) +
-    labs(
-      x = "Chronological Age (years)",
-      y = title_name,
-      title = title_name,
-      color = "Time point"
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
-      axis.title = element_text(size = 10),
-      legend.position = "right"
-    )
-  
-  # Add fitted regression line
-  p <- p + geom_smooth(
-    aes(color = NULL),
-    method = "lm",
-    se = FALSE,
-    linetype = "dashed",
-    color = "grey30",
-    linewidth = 0.8
-  )
-  
-  return(p)
-}
-```
-
-```{r}
 plot_against_age_lmm <- function(
   df,
   col_name,
@@ -246,21 +210,227 @@ plot_against_age_lmm <- function(
 ```
 
 ```{r}
-# Helper to fit LMM and return plot for one clock
+extract_weight_loss_term <- function(model, outcome, model_name, cov = "max_weight_loss_perc") {
+  coef_df <- as.data.frame(summary(model)$coefficients)
+  model_n <- nrow(model.frame(model))
+
+  coef_df %>%
+    tibble::rownames_to_column("term") %>%
+    filter(term == cov) %>%
+    transmute(
+      outcome = outcome,
+      model = model_name,
+      beta = Estimate,
+      SE = `Std. Error`,
+      df = df,
+      t_value = `t value`,
+      p_value = `Pr(>|t|)`,
+      n = model_n
+    )
+}
+
+extract_model_terms <- function(model,
+                                outcome,
+                                model_name,
+                                terms,
+                                response = outcome) {
+  coef_df <- as.data.frame(summary(model)$coefficients)
+  model_n <- nrow(model.frame(model))
+  p_col <- intersect(c("Pr(>|t|)", "Pr(>|z|)"), colnames(coef_df))[1]
+  df_col <- intersect(c("df"), colnames(coef_df))[1]
+  model_df <- if (!is.na(df_col)) NULL else df.residual(model)
+
+  coef_df %>%
+    tibble::rownames_to_column("term") %>%
+    filter(term %in% terms) %>%
+    transmute(
+      outcome = outcome,
+      response = response,
+      model = model_name,
+      term,
+      beta = Estimate,
+      SE = `Std. Error`,
+      df = if (!is.na(df_col)) .data[[df_col]] else model_df,
+      t_value = `t value`,
+      p_value = .data[[p_col]],
+      n = model_n
+    )
+}
+
+fit_ageaccel_models <- function(df,
+                                outcome,
+                                cov = "max_weight_loss_perc",
+                                bmi_cov = "baseline_BMI") {
+  needed <- c(
+    outcome, "Female", "Timepoint", "LYMPHOZYTEN",
+    cov, bmi_cov, "ID"
+  )
+
+  df_sub <- df %>%
+    select(all_of(needed)) %>%
+    drop_na()
+
+  if (nrow(df_sub) < 5) return(NULL)
+
+  fixed_m3 <- paste(c("Female", "Timepoint", "LYMPHOZYTEN", cov), collapse = " + ")
+  fixed_m4 <- paste(c("Female", "Timepoint", "LYMPHOZYTEN", bmi_cov, cov), collapse = " + ")
+  formula_m3 <- as.formula(paste(outcome, "~", fixed_m3, "+ (1 | ID)"))
+  formula_m4 <- as.formula(paste(outcome, "~", fixed_m4, "+ (1 | ID)"))
+
+  list(
+    data = df_sub,
+    model3 = lmer(formula_m3, data = df_sub),
+    model4 = lmer(formula_m4, data = df_sub)
+  )
+}
+
+compare_ageaccel_models <- function(df,
+                                    outcome,
+                                    cov = "max_weight_loss_perc",
+                                    bmi_cov = "baseline_BMI") {
+  fits <- fit_ageaccel_models(df, outcome, cov = cov, bmi_cov = bmi_cov)
+  if (is.null(fits)) return(NULL)
+
+  bind_rows(
+    extract_weight_loss_term(fits$model3, outcome, "Model 3: lymphocyte-adjusted", cov = cov),
+    extract_weight_loss_term(fits$model4, outcome, "Model 4: + baseline BMI", cov = cov)
+  )
+}
+
+fit_ageaccel_interaction_model <- function(df,
+                                           outcome,
+                                           cov = "max_weight_loss_perc",
+                                           bmi_cov = "baseline_BMI") {
+  needed <- c(
+    outcome, "Female", "Timepoint", "LYMPHOZYTEN",
+    cov, bmi_cov, "ID"
+  )
+
+  df_sub <- df %>%
+    select(all_of(needed)) %>%
+    drop_na()
+
+  if (nrow(df_sub) < 5) return(NULL)
+
+  formula_m5 <- as.formula(
+    paste0(
+      outcome, " ~ ", cov, " * ", bmi_cov,
+      " + Timepoint + Female + LYMPHOZYTEN + (1 | ID)"
+    )
+  )
+
+  lmer(formula_m5, data = df_sub)
+}
+
+compare_ageaccel_interaction_model <- function(df,
+                                               outcome,
+                                               cov = "max_weight_loss_perc",
+                                               bmi_cov = "baseline_BMI") {
+  model <- fit_ageaccel_interaction_model(
+    df,
+    outcome,
+    cov = cov,
+    bmi_cov = bmi_cov
+  )
+  if (is.null(model)) return(NULL)
+
+  extract_model_terms(
+    model,
+    outcome = outcome,
+    model_name = "Model 5: weight loss x baseline BMI",
+    terms = c(cov, bmi_cov, paste0(cov, ":", bmi_cov)),
+    response = outcome
+  )
+}
+
+fit_baseline_model6 <- function(df,
+                                outcome,
+                                cov = "max_weight_loss_perc",
+                                bmi_cov = "baseline_BMI") {
+  needed <- c(outcome, cov, bmi_cov, "Female", "Timepoint")
+
+  df_sub <- df %>%
+    filter(Timepoint == "D-1") %>%
+    select(all_of(needed)) %>%
+    drop_na()
+
+  if (nrow(df_sub) < 5) return(NULL)
+
+  formula_m6 <- as.formula(
+    paste0(outcome, " ~ ", cov, " + ", bmi_cov, " + Female")
+  )
+
+  lm(formula_m6, data = df_sub)
+}
+
+compare_baseline_model6 <- function(df,
+                                    outcome,
+                                    cov = "max_weight_loss_perc",
+                                    bmi_cov = "baseline_BMI") {
+  model <- fit_baseline_model6(df, outcome, cov = cov, bmi_cov = bmi_cov)
+  if (is.null(model)) return(NULL)
+
+  extract_model_terms(
+    model,
+    outcome = outcome,
+    model_name = "Model 6: baseline RAA outcome",
+    terms = c(cov, bmi_cov),
+    response = outcome
+  )
+}
+
+fit_baseline_model7 <- function(df,
+                                outcome,
+                                cov = "max_weight_loss_perc",
+                                bmi_cov = "baseline_BMI") {
+  needed <- c(outcome, cov, bmi_cov, "Female", "Timepoint")
+
+  df_sub <- df %>%
+    filter(Timepoint == "D-1") %>%
+    select(all_of(needed)) %>%
+    drop_na()
+
+  if (nrow(df_sub) < 5) return(NULL)
+
+  formula_m7 <- as.formula(
+    paste0(cov, " ~ ", outcome, " + ", bmi_cov, " + Female")
+  )
+
+  lm(formula_m7, data = df_sub)
+}
+
+compare_baseline_model7 <- function(df,
+                                    outcome,
+                                    cov = "max_weight_loss_perc",
+                                    bmi_cov = "baseline_BMI") {
+  model <- fit_baseline_model7(df, outcome, cov = cov, bmi_cov = bmi_cov)
+  if (is.null(model)) return(NULL)
+
+  extract_model_terms(
+    model,
+    outcome = outcome,
+    model_name = "Model 7: weight loss outcome",
+    terms = c(outcome, bmi_cov),
+    response = cov
+  )
+}
+
+# Helper to fit repeated-measures age-acceleration models and return a plot for one clock
 fit_ageaccel <- function(df, outcome, cov="max_weight_loss_perc",
                          xlab="Max Weight Loss Percentage",
-                         ylab=NULL, title=NULL) {
+                         ylab=NULL, title=NULL,
+                         model_version = c("model3", "model4")) {
+  model_version <- match.arg(model_version)
+
   # Use outcome name as default if not provided
   if (is.null(ylab)) ylab <- outcome
   if (is.null(title)) title <- outcome
   
-  # data subset: require outcome present
-  df_sub <- df %>% filter(!is.na(.data[[outcome]]))
-  if (nrow(df_sub) < 5) return(NULL)
-  formula_lmm <- as.formula(
-    paste0(outcome, " ~ Female + Timepoint + NEUTROPHILE + LYMPHOZYTEN + ", cov, " + (1 | ID)")
-  )
-  model <- lmer(formula_lmm, data = df_sub)
+  fits <- fit_ageaccel_models(df, outcome, cov = cov)
+  if (is.null(fits)) return(NULL)
+
+  df_sub <- fits$data
+  model <- fits[[model_version]]
   preds <- ggpredict(model, terms = c(cov, "Timepoint"))
   coef_est <- summary(model)$coefficients[cov, "Estimate"]
   pval <- summary(model)$coefficients[cov, "Pr(>|t|)"]
@@ -327,8 +497,170 @@ ggsave(
 
 # EpiAgeAccel vs Weight Loss
 
-```{r ageaccel-weights, warning=FALSE, message=FALSE}
+## Models 3 and 4: repeated-measures weight-loss association
 
+Model 3 is a repeated-measures linear mixed model that tests whether each
+residual age-acceleration (RAA) measure is associated with maximum weight-loss
+percentage after adjustment for sex, timepoint, and lymphocyte proportion, with
+a participant-specific random intercept:
+`RAA ~ Female + Timepoint + LYMPHOZYTEN + max_weight_loss_perc + (1 | ID)`.
+
+Model 4 uses the same repeated-measures structure as Model 3 and adds baseline
+BMI, defined as each participant's D-1 BMI, as an additional covariate:
+`RAA ~ Female + Timepoint + LYMPHOZYTEN + baseline_BMI + max_weight_loss_perc + (1 | ID)`.
+
+```{r ageaccel-model3-model4, warning=FALSE, message=FALSE}
+ageaccel_model_comparison <- map_dfr(
+  names(ageaccel_titles),
+  ~ compare_ageaccel_models(df_age_accel, .x)
+) %>%
+  mutate(
+    clock = unname(unlist(ageaccel_titles[outcome])),
+    p_value = signif(p_value, 3),
+    across(c(beta, SE, df, t_value), ~ round(.x, 3))
+  )
+
+ageaccel_model_comparison_wide <- ageaccel_model_comparison %>%
+  select(clock, outcome, model, beta, SE, df, p_value, n) %>%
+  pivot_wider(
+    names_from = model,
+    values_from = c(beta, SE, df, p_value, n)
+  ) %>%
+  transmute(
+    clock,
+    outcome,
+    beta_model3 = `beta_Model 3: lymphocyte-adjusted`,
+    p_model3 = `p_value_Model 3: lymphocyte-adjusted`,
+    n_model3 = `n_Model 3: lymphocyte-adjusted`,
+    beta_model4 = `beta_Model 4: + baseline BMI`,
+    p_model4 = `p_value_Model 4: + baseline BMI`,
+    n_model4 = `n_Model 4: + baseline BMI`,
+    beta_change_after_baseline_BMI =
+      `beta_Model 4: + baseline BMI` -
+      `beta_Model 3: lymphocyte-adjusted`
+  ) %>%
+  mutate(beta_change_after_baseline_BMI = round(beta_change_after_baseline_BMI, 3))
+
+knitr::kable(
+  ageaccel_model_comparison_wide,
+  caption = "Comparison of max-weight-loss coefficient before and after adding baseline BMI",
+  digits = 3
+)
+
+write_csv(
+  ageaccel_model_comparison,
+  "figures/AgeAccel_weight_loss_model3_model4_comparison_long.csv"
+)
+
+write_csv(
+  ageaccel_model_comparison_wide,
+  "figures/AgeAccel_weight_loss_model3_model4_comparison_wide.csv"
+)
+```
+
+## Model 5: weight-loss by baseline BMI interaction
+
+Model 5 is a repeated-measures linear mixed model that evaluates whether baseline BMI
+modifies the association between maximum weight-loss percentage and each RAA
+measure. It includes the weight-loss-by-baseline-BMI interaction, timepoint, sex,
+lymphocyte proportion, and a participant-specific random intercept:
+`RAA ~ max_weight_loss_perc * baseline_BMI + Timepoint + Female + LYMPHOZYTEN + (1 | ID)`.
+
+```{r ageaccel-model5-interaction, warning=FALSE, message=FALSE}
+
+ageaccel_model5_interaction <- map_dfr(
+  names(ageaccel_titles),
+  ~ compare_ageaccel_interaction_model(df_age_accel, .x)
+) %>%
+  mutate(
+    clock = unname(unlist(ageaccel_titles[outcome])),
+    p_value = signif(p_value, 3),
+    across(c(beta, SE, df, t_value), ~ round(.x, 3))
+  ) %>%
+  select(clock, outcome, response, model, term, beta, SE, df, t_value, p_value, n)
+
+knitr::kable(
+  ageaccel_model5_interaction,
+  caption = "Model 5 interaction analysis: RAA ~ weight loss x baseline BMI + timepoint + gender + lymphocytes + (1 | ID)",
+  digits = 3
+)
+
+write_csv(
+  ageaccel_model5_interaction,
+  "figures/AgeAccel_weight_loss_model5_interaction.csv"
+)
+```
+
+## Model 6: baseline-only sensitivity analysis
+
+Model 6 is a baseline-only linear model restricted to D-1 samples. It tests the
+cross-sectional association between baseline RAA and maximum weight-loss
+percentage while adjusting for baseline BMI and sex:
+`baseline RAA ~ max_weight_loss_perc + baseline_BMI + Female`.
+
+```{r ageaccel-model6-baseline-raa, warning=FALSE, message=FALSE}
+
+ageaccel_model6_baseline_RAA <- map_dfr(
+  names(ageaccel_titles),
+  ~ compare_baseline_model6(df_age_accel, .x)
+) %>%
+  mutate(
+    clock = unname(unlist(ageaccel_titles[outcome])),
+    p_value = signif(p_value, 3),
+    across(c(beta, SE, df, t_value), ~ round(.x, 3))
+  ) %>%
+  select(clock, outcome, response, model, term, beta, SE, df, t_value, p_value, n)
+
+knitr::kable(
+  ageaccel_model6_baseline_RAA,
+  caption = "Model 6 baseline-only sensitivity: baseline RAA ~ weight loss + baseline BMI + gender",
+  digits = 3
+)
+
+write_csv(
+  ageaccel_model6_baseline_RAA,
+  "figures/AgeAccel_weight_loss_model6_baseline_RAA.csv"
+)
+```
+
+## Model 7: baseline RAA predicting weight loss
+
+Model 7 is a baseline-only linear model restricted to D-1 samples with maximum
+weight-loss percentage as the outcome. It tests whether baseline RAA predicts
+subsequent maximum weight loss after adjustment for baseline BMI and sex:
+`max_weight_loss_perc ~ baseline RAA + baseline_BMI + Female`.
+
+```{r ageaccel-model7-weight-loss, warning=FALSE, message=FALSE}
+
+ageaccel_model7_weight_loss <- map_dfr(
+  names(ageaccel_titles),
+  ~ compare_baseline_model7(df_age_accel, .x)
+) %>%
+  mutate(
+    clock = unname(unlist(ageaccel_titles[outcome])),
+    p_value = signif(p_value, 3),
+    across(c(beta, SE, df, t_value), ~ round(.x, 3))
+  ) %>%
+  select(clock, outcome, response, model, term, beta, SE, df, t_value, p_value, n)
+
+knitr::kable(
+  ageaccel_model7_weight_loss,
+  caption = "Model 7 baseline-only prediction: weight loss ~ baseline RAA + baseline BMI + gender",
+  digits = 3
+)
+
+write_csv(
+  ageaccel_model7_weight_loss,
+  "figures/AgeAccel_weight_loss_model7_weight_loss_outcome.csv"
+)
+```
+
+## Model 3 visualization: RAA versus maximum weight loss
+
+These plots show the observed RAA values against maximum weight-loss percentage
+and overlay Model 3 marginal predictions by timepoint.
+
+```{r ageaccel-weights, warning=FALSE, message=FALSE}
 # Build plots for each age acceleration outcome
 ageaccel_plots <- pmap(
   list(
@@ -349,6 +681,47 @@ if (length(ageaccel_plots) > 0) {
   
   ggsave("figures/AgeAccel.pdf", final_ageaccel, width = 13, height = 8)
   final_ageaccel
+}
+```
+
+## Model 4 visualization: RAA versus maximum weight loss
+
+These plots use the same visualization as Model 3, but the marginal prediction
+lines and annotated coefficient come from Model 4, which additionally adjusts
+for baseline BMI.
+
+```{r ageaccel-weights-model4, warning=FALSE, message=FALSE}
+# Build Model 4 plots for each age acceleration outcome
+ageaccel_model4_plots <- pmap(
+  list(
+    outcome = names(ageaccel_titles),
+    title = unname(ageaccel_titles),
+    ylab = unname(ageaccel_titles)
+  ),
+  ~ fit_ageaccel(
+    df_age_accel,
+    ..1,
+    ylab = ..3,
+    title = ..2,
+    model_version = "model4"
+  )
+)
+names(ageaccel_model4_plots) <- names(ageaccel_titles)
+ageaccel_model4_plots <- compact(ageaccel_model4_plots)  # drop NULLs
+
+# Combine and save
+if (length(ageaccel_model4_plots) > 0) {
+  final_ageaccel_model4 <- wrap_plots(ageaccel_model4_plots, ncol = 4) +
+    plot_layout(guides = "collect") +
+    theme(legend.position = "right")
+
+  ggsave(
+    "figures/AgeAccel_model4.pdf",
+    final_ageaccel_model4,
+    width = 13,
+    height = 8
+  )
+  final_ageaccel_model4
 }
 ```
 
@@ -379,4 +752,3 @@ if (length(ageaccel_subset) > 0) {
   final_subset
 }
 ```
-
