@@ -1116,6 +1116,20 @@ p_decomposition_raincloud
 ```
 
 ```{r adjusted-vs-unadjusted-helpers}
+clean_adjusted_vs_unadjusted_label <- function(x) {
+  recode(
+    x,
+    PCHorvath1 = "Horvath1",
+    PCHorvath2 = "Horvath2",
+    PCHannum = "Hannum",
+    PCPhenoAge = "PhenoAge",
+    PCGrimAge = "GrimAge",
+    DNAmGrimAge2 = "GrimAge2",
+    PCDNAmTL = "DNAmTL",
+    .default = x
+  )
+}
+
 prepare_adjusted_vs_unadjusted <- function(effect_sizes,
                                            label_col = "clock") {
   effect_sizes %>%
@@ -1132,6 +1146,7 @@ prepare_adjusted_vs_unadjusted <- function(effect_sizes,
       values_from = c(effect_size, p_value)
     ) %>%
     mutate(
+      label = clean_adjusted_vs_unadjusted_label(label),
       delta_diff =
         `effect_size_With blood-cell adjustment` -
         `effect_size_Without blood-cell adjustment`,
@@ -1185,10 +1200,13 @@ plot_adjusted_vs_unadjusted <- function(adjusted_vs_unadjusted,
     geom_text_repel(
       size = label_size,
       max.overlaps = Inf,
-      box.padding = 0.12,
-      point.padding = 0.06,
+      box.padding = 0.18,
+      point.padding = 0.08,
       min.segment.length = 0,
-      segment.alpha = 0.35
+      segment.alpha = 0.35,
+      force = 1.8,
+      force_pull = 0.4,
+      max.time = 2
     ) +
     scale_color_gradient2(
       low = "blue",
@@ -1241,6 +1259,15 @@ plot_adjusted_vs_unadjusted <- function(adjusted_vs_unadjusted,
     p + facet_wrap(~timepoint, ncol = facet_ncol)
   }
 }
+
+save_adjusted_vs_unadjusted_pdf <- function(filename,
+                                            plot,
+                                            width = 8.5,
+                                            height = 4.4) {
+  grDevices::cairo_pdf(filename, width = width, height = height)
+  print(plot)
+  dev.off()
+}
 ```
 
 ```{r decomposition-adjusted-vs-unadjusted, fig.width=11, fig.height=5.5}
@@ -1253,7 +1280,7 @@ p_adjusted_vs_unadjusted <- plot_adjusted_vs_unadjusted(
   adjusted_vs_unadjusted,
   title = "Clock time effects before and after lymphocyte adjustment",
   facet_ncol = 2,
-  label_size = 2.2,
+  label_size = 2.0,
   point_size = 2.1
 )
 
@@ -1288,7 +1315,8 @@ run_pca_loadings <- function(data_wide, timepoint_value,
     mutate(
       timepoint = timepoint_value,
       var_PC1 = var_expl[1],
-      var_PC2 = var_expl[2]
+      var_PC2 = var_expl[2],
+      var_PC3 = var_expl[3]
     )
 
   list(pca = pca, loadings = load_df, var_expl = var_expl)
@@ -1306,7 +1334,16 @@ loadings_all <- bind_rows(res_d10$loadings, res_m1$loadings) %>%
 ```{r pca-loadings-pc12, fig.width=10, fig.height=5}
 # Axis limits shared across panels
 x_lim <- range(loadings_all$PC1, na.rm = TRUE)
-y_lim <- range(loadings_all$PC2, na.rm = TRUE)
+pc12_y_lim <- range(loadings_all$PC2, na.rm = TRUE)
+pc12_y_span <- diff(pc12_y_lim)
+pc12_plot_y_lim <- c(pc12_y_lim[1], pc12_y_lim[2] + 0.22 * pc12_y_span)
+
+pc12_label_positions <- loadings_all %>%
+  distinct(timepoint, var_PC1, var_PC2) %>%
+  mutate(
+    label_x = x_lim[1] + 0.02 * diff(x_lim),
+    label_y = pc12_y_lim[2] + 0.18 * pc12_y_span
+  )
 
 p_loadings12 <- ggplot(loadings_all, aes(x = PC1, y = PC2, color = generation)) +
   geom_hline(yintercept = 0, linewidth = 0.3, alpha = 0.5) +
@@ -1316,9 +1353,8 @@ p_loadings12 <- ggplot(loadings_all, aes(x = PC1, y = PC2, color = generation)) 
     aes(label = gsub("_RAA_z_base_delta", "", clock)),
     size = 3, max.overlaps = Inf, show.legend = FALSE
   ) +
-  coord_fixed() +
   facet_wrap(~timepoint, nrow = 1) +
-  xlim(x_lim) + ylim(y_lim) +
+  coord_cartesian(xlim = x_lim, ylim = pc12_plot_y_lim) +
   theme_minimal(base_size = 12) +
   labs(
     title = expression("PCA of " * Delta * "SRAA: clock loading structure at D+10 and M+1"),
@@ -1326,23 +1362,38 @@ p_loadings12 <- ggplot(loadings_all, aes(x = PC1, y = PC2, color = generation)) 
     y = "PC2 loading",
     color = "Generation"
   ) +
-  geom_label(
-    data = loadings_all %>% distinct(timepoint, var_PC1, var_PC2),
+  geom_text(
+    data = pc12_label_positions,
     aes(
-      x = Inf, y = Inf,
+      x = label_x,
+      y = label_y,
       label = paste0(
         "Var(PC1)=", sprintf("%.1f", 100 * var_PC1), "%\n",
         "Var(PC2)=", sprintf("%.1f", 100 * var_PC2), "%"
       )
     ),
-    hjust = 2.8, vjust = 1.1, inherit.aes = FALSE, size = 3
+    hjust = 0,
+    vjust = 1,
+    lineheight = 0.95,
+    color = "black",
+    inherit.aes = FALSE,
+    size = 3
   )
 
 p_loadings12
 ```
 
 ```{r pca-loadings-pc13, fig.width=10, fig.height=5}
-y_lim <- range(loadings_all$PC3, na.rm = TRUE)
+pc13_y_lim <- range(loadings_all$PC3, na.rm = TRUE)
+pc13_y_span <- diff(pc13_y_lim)
+pc13_plot_y_lim <- c(pc13_y_lim[1], pc13_y_lim[2] + 0.22 * pc13_y_span)
+
+pc13_label_positions <- loadings_all %>%
+  distinct(timepoint, var_PC1, var_PC3) %>%
+  mutate(
+    label_x = x_lim[1] + 0.02 * diff(x_lim),
+    label_y = pc13_y_lim[2] + 0.18 * pc13_y_span
+  )
 
 p_loadings13 <- ggplot(loadings_all, aes(x = PC1, y = PC3, color = generation)) +
   geom_hline(yintercept = 0, linewidth = 0.3, alpha = 0.5) +
@@ -1353,7 +1404,7 @@ p_loadings13 <- ggplot(loadings_all, aes(x = PC1, y = PC3, color = generation)) 
     size = 3, max.overlaps = Inf, show.legend = FALSE
   ) +
   facet_wrap(~timepoint, nrow = 1) +
-  xlim(x_lim) + ylim(y_lim) +
+  coord_cartesian(xlim = x_lim, ylim = pc13_plot_y_lim) +
   theme_minimal(base_size = 12) +
   labs(
     title = expression("PCA of " * Delta * "SRAA: clock loading structure at D+10 and M+1"),
@@ -1361,19 +1412,57 @@ p_loadings13 <- ggplot(loadings_all, aes(x = PC1, y = PC3, color = generation)) 
     y = "PC3 loading",
     color = "Generation"
   ) +
-  geom_label(
-    data = loadings_all %>% distinct(timepoint, var_PC1, var_PC2),
+  geom_text(
+    data = pc13_label_positions,
     aes(
-      x = Inf, y = Inf,
+      x = label_x,
+      y = label_y,
       label = paste0(
         "Var(PC1)=", sprintf("%.1f", 100 * var_PC1), "%\n",
-        "Var(PC3)=", sprintf("%.1f", 100 * var_PC2), "%"
+        "Var(PC3)=", sprintf("%.1f", 100 * var_PC3), "%"
       )
     ),
-    hjust = 3.3, vjust = 1.1, inherit.aes = FALSE, size = 3
+    hjust = 0,
+    vjust = 1,
+    lineheight = 0.95,
+    color = "black",
+    inherit.aes = FALSE,
+    size = 3
   )
 
 p_loadings13
+```
+
+```{r pca-loadings-combined, fig.width=10, fig.height=10}
+p_loadings_legend <- get_legend(
+  p_loadings12 +
+    theme(legend.position = "right")
+)
+
+p_loadings_panels <- plot_grid(
+  p_loadings12 +
+    labs(title = "PC1 vs PC2 clock loadings") +
+    theme(legend.position = "none"),
+  p_loadings13 +
+    labs(title = "PC1 vs PC3 clock loadings") +
+    theme(legend.position = "none"),
+  labels = c("a", "b"),
+  label_size = 20,
+  ncol = 1,
+  align = "v",
+  axis = "lr"
+)
+
+p_loadings_pc12_pc13 <- plot_grid(
+  p_loadings_panels,
+  p_loadings_legend,
+  ncol = 2,
+  rel_widths = c(1, 0.16),
+  align = "h",
+  axis = "tb"
+)
+
+p_loadings_pc12_pc13
 ```
 
 ```{r pca-3d-plot}
@@ -1723,77 +1812,30 @@ p_adapt2
 # Figure Saving
 
 ```{r save-main-figures}
-# Figure 4: Main analysis
-grDevices::cairo_pdf("figures/Fig4_with_blood_cell_adjustment.pdf", width = 7.8, height = 8.2)
-plot_grid(
-  main_res$p2 + labs(x = ""),
-  p_loadings12 + theme(
-    plot.margin = margin(t = 1, r = 1, b = 1, l = 1, unit = "pt"),
-    legend.margin = margin(0, 0, 0, 0, "pt"),
-    legend.spacing = unit(0, "cm"),
-    plot.title = element_text(size = 13)
-  ),
-  labels = c("a", "b"), label_size = 20, ncol = 1, rel_heights = c(1, 1.1)
-)
-dev.off()
-
-# Figure 4 panel a variant: no neutrophil/lymphocyte adjustment
-grDevices::cairo_pdf("figures/Fig4_panel_a_no_blood_cell_adjustment.pdf", width = 7.8, height = 4)
-print(
-  main_res_no_cell$p2 +
-    labs(
-      x = "",
-      title = "Within-subject effect sizes (no blood-cell adjustment)"
-    )
-)
-dev.off()
-
-# Supplementary Figure 4-1
-grDevices::cairo_pdf("figures/SFig4-1.pdf", width = 9, height = 9)
-plot_grid(
-  main_res$p1 + labs(x = ""),
-  p_loadings13 + theme(
-    plot.margin = margin(t = 1, r = 1, b = 1, l = 1, unit = "pt"),
-    legend.margin = margin(0, 0, 0, 0, "pt"),
-    plot.title = element_text(size = 13)
-  ),
-  labels = c("a", "b"), label_size = 20, ncol = 1, rel_heights = c(1, 1)
-)
-dev.off()
-
-# Supplementary Figure 4-2
-grDevices::cairo_pdf("figures/SFig4-2.pdf", width = 10, height = 12)
-plot_grid(p_dam1, p_adapt1,
-  labels = c("a", "b"), label_size = 20, ncol = 1, rel_heights = c(1, 1)
-)
-dev.off()
-
-grDevices::cairo_pdf("figures/SFig4-2-1.pdf", width = 8, height = 7)
+# Save clinical association plots
+grDevices::cairo_pdf("figures/metabolic_assoc_D10_DamAge.pdf", width = 8, height = 7)
 print(p_dam1)
 dev.off()
-grDevices::cairo_pdf("figures/SFig4-2-2.pdf", width = 8, height = 7)
+grDevices::cairo_pdf("figures/metabolic_assoc_D10_AdaptAge.pdf", width = 8, height = 7)
 print(p_adapt1)
 dev.off()
 
-grDevices::cairo_pdf("figures/SFig4-2-3.pdf", width = 8, height = 7)
+grDevices::cairo_pdf("figures/metabolic_assoc_M1_DamAge.pdf", width = 8, height = 7)
 print(p_dam2)
 dev.off()
-grDevices::cairo_pdf("figures/SFig4-2-4.pdf", width = 8, height = 7)
+grDevices::cairo_pdf("figures/metabolic_assoc_M1_AdaptAge.pdf", width = 8, height = 7)
 print(p_adapt2)
 dev.off()
 
 # Save PCA loading plots
-pdf("figures/clock_PCA_loadings_PC1-2.pdf", width = 10, height = 5)
-plot(p_loadings12)
+pdf("figures/clock_PCA_loadings_PC1-2_PC1-3.pdf", width = 10, height = 10)
+plot(p_loadings_pc12_pc13)
 dev.off()
 
-pdf("figures/clock_PCA_loadings_PC13.pdf", width = 10, height = 5)
-plot(p_loadings13)
-dev.off()
-
-pdf("figures/adjusted_vs_unadjusted_clock_time_effects.pdf", width = 11, height = 5.5)
-plot(p_adjusted_vs_unadjusted)
-dev.off()
+save_adjusted_vs_unadjusted_pdf(
+  "figures/adjusted_vs_unadjusted_clock_time_effects.pdf",
+  p_adjusted_vs_unadjusted
+)
 ```
 
 # Clock Component Analysis
@@ -2054,60 +2096,55 @@ decomp_grimage2_outputs$raincloud
 ### GrimAge Component Plots
 
 ```{r save-component-figures}
-# Supplementary Figure 4-3: GrimAge components
-grDevices::cairo_pdf("figures/SFig4-3.pdf", width = 8.5, height = 10)
+grDevices::cairo_pdf("figures/SFig4-7_GrimAge_family_components_blood_adjustment.pdf", width = 8.5, height = 10)
 plot_grid(
-  res_pc_grimage$p2 + labs(title = "PCGrimAge (composition adjusted)", x = NULL),
-  res1$p2 + labs(title = "GrimAge (composition adjusted)", x = NULL),
-  res2$p2 + labs(title = "GrimAge v2 (composition adjusted)", x = NULL),
-  labels = c("a", "b", "c"), label_size = 20, ncol = 1, rel_heights = c(1, 1, 1)
+  res_pc_grimage$p2 + labs(title = "PCGrimAge components (blood-cell adjusted)", x = NULL),
+  res1$p2 + labs(title = "GrimAge components (blood-cell adjusted)", x = NULL),
+  res2$p2 + labs(title = "GrimAge v2 components (blood-cell adjusted)", x = NULL),
+  labels = c("a", "b", "c"),
+  label_size = 20,
+  ncol = 1,
+  rel_heights = c(1, 1, 1)
 )
 dev.off()
 
-# Supplementary Figure 4-3 variant: no neutrophil/lymphocyte adjustment
-grDevices::cairo_pdf("figures/SFig4-3_no_blood_cell_adjustment.pdf", width = 8.5, height = 10)
-plot_grid(
-  res_pc_grimage_no_cell$p2 + labs(title = "PCGrimAge", x = NULL),
-  res1_no_cell$p2 + labs(title = "GrimAge", x = NULL),
-  res2_no_cell$p2 + labs(title = "GrimAge v2", x = NULL),
-  labels = c("a", "b", "c"), label_size = 20, ncol = 1, rel_heights = c(1, 1, 1)
+save_adjusted_vs_unadjusted_pdf(
+  "figures/adjusted_vs_unadjusted_PCGrimAge_components.pdf",
+  p_adjusted_vs_unadjusted_pc_grimage
 )
-dev.off()
 
-grDevices::cairo_pdf("figures/SFig4-3_PCGrimAge_adjusted_vs_unadjusted.pdf", width = 11, height = 5.5)
-print(p_adjusted_vs_unadjusted_pc_grimage)
-dev.off()
+save_adjusted_vs_unadjusted_pdf(
+  "figures/adjusted_vs_unadjusted_GrimAge_components.pdf",
+  p_adjusted_vs_unadjusted_grimage1
+)
 
-grDevices::cairo_pdf("figures/SFig4-3_GrimAge_adjusted_vs_unadjusted.pdf", width = 11, height = 5.5)
-print(p_adjusted_vs_unadjusted_grimage1)
-dev.off()
-
-grDevices::cairo_pdf("figures/SFig4-3_GrimAge2_adjusted_vs_unadjusted.pdf", width = 11, height = 5.5)
-print(p_adjusted_vs_unadjusted_grimage2)
-dev.off()
+save_adjusted_vs_unadjusted_pdf(
+  "figures/adjusted_vs_unadjusted_GrimAge2_components.pdf",
+  p_adjusted_vs_unadjusted_grimage2
+)
 
 # GrimAge component decomposition figures
-grDevices::cairo_pdf("figures/SFig4-3_PCGrimAge_decomposition_spaghetti.pdf", width = 10, height = 5.5)
+grDevices::cairo_pdf("figures/decomposition_PCGrimAge_components_spaghetti.pdf", width = 10, height = 5.5)
 print(decomp_pc_grimage_outputs$spaghetti)
 dev.off()
 
-grDevices::cairo_pdf("figures/SFig4-3_PCGrimAge_decomposition_raincloud.pdf", width = 10, height = 5.5)
+grDevices::cairo_pdf("figures/decomposition_PCGrimAge_components_raincloud.pdf", width = 10, height = 5.5)
 print(decomp_pc_grimage_outputs$raincloud)
 dev.off()
 
-grDevices::cairo_pdf("figures/SFig4-3_GrimAge_decomposition_spaghetti.pdf", width = 10, height = 5.5)
+grDevices::cairo_pdf("figures/decomposition_GrimAge_components_spaghetti.pdf", width = 10, height = 5.5)
 print(decomp_grimage1_outputs$spaghetti)
 dev.off()
 
-grDevices::cairo_pdf("figures/SFig4-3_GrimAge_decomposition_raincloud.pdf", width = 10, height = 5.5)
+grDevices::cairo_pdf("figures/decomposition_GrimAge_components_raincloud.pdf", width = 10, height = 5.5)
 print(decomp_grimage1_outputs$raincloud)
 dev.off()
 
-grDevices::cairo_pdf("figures/SFig4-3_GrimAge2_decomposition_spaghetti.pdf", width = 11, height = 5.5)
+grDevices::cairo_pdf("figures/decomposition_GrimAge2_components_spaghetti.pdf", width = 11, height = 5.5)
 print(decomp_grimage2_outputs$spaghetti)
 dev.off()
 
-grDevices::cairo_pdf("figures/SFig4-3_GrimAge2_decomposition_raincloud.pdf", width = 11, height = 5.5)
+grDevices::cairo_pdf("figures/decomposition_GrimAge2_components_raincloud.pdf", width = 11, height = 5.5)
 print(decomp_grimage2_outputs$raincloud)
 dev.off()
 ```
@@ -2234,26 +2271,168 @@ decomp_systemsage_outputs$raincloud
 ### SystemsAge Component Plots
 
 ```{r save-systemsage-figure}
-# Supplementary Figure 4-4: SystemsAge components
-grDevices::cairo_pdf("figures/SFig4-4.pdf", width = 8.5, height = 4)
-print(ress$p2 + labs(title = "SystemsAge (composition adjusted)", x = NULL))
-dev.off()
+save_adjusted_vs_unadjusted_pdf(
+  "figures/adjusted_vs_unadjusted_SystemsAge_components.pdf",
+  p_adjusted_vs_unadjusted_systemsage
+)
 
-# Supplementary Figure 4-4 variant: no neutrophil/lymphocyte adjustment
-grDevices::cairo_pdf("figures/SFig4-4_no_blood_cell_adjustment.pdf", width = 8.5, height = 4)
-print(ress_no_cell$p2 + labs(title = "SystemsAge", x = NULL))
-dev.off()
-
-grDevices::cairo_pdf("figures/SFig4-4_adjusted_vs_unadjusted.pdf", width = 11, height = 5.5)
-print(p_adjusted_vs_unadjusted_systemsage)
-dev.off()
-
-grDevices::cairo_pdf("figures/SFig4-4_decomposition_spaghetti.pdf", width = 11, height = 5.5)
+grDevices::cairo_pdf("figures/decomposition_SystemsAge_components_spaghetti.pdf", width = 11, height = 5.5)
 print(decomp_systemsage_outputs$spaghetti)
 dev.off()
 
-grDevices::cairo_pdf("figures/SFig4-4_decomposition_raincloud.pdf", width = 11, height = 5.5)
+grDevices::cairo_pdf("figures/decomposition_SystemsAge_components_raincloud.pdf", width = 11, height = 5.5)
 print(decomp_systemsage_outputs$raincloud)
+dev.off()
+```
+
+## Figure 4 and Supplementary Figure 4 Exports
+
+```{r save-reorganized-figure-4}
+# Figure 4: unadjusted within-subject raincloud plots
+grDevices::cairo_pdf("figures/Fig4.pdf", width = 8.5, height = 11)
+print(
+  plot_grid(
+    main_res_no_cell$p2 +
+      labs(title = "Within-subject effect sizes", x = NULL),
+    res_pc_grimage_no_cell$p2 +
+      labs(title = "PCGrimAge components", x = NULL),
+    ress_no_cell$p2 +
+      labs(title = "SystemsAge components", x = NULL),
+    labels = c("a", "b", "c"),
+    label_size = 20,
+    ncol = 1,
+    rel_heights = c(1, 1, 1)
+  )
+)
+dev.off()
+
+# Figure 4 switched version: adjusted within-subject raincloud plots
+grDevices::cairo_pdf("figures/Fig4_blood_cell_adjusted.pdf", width = 8.5, height = 11)
+print(
+  plot_grid(
+    main_res$p2 +
+      labs(title = "Within-subject effect sizes (blood-cell adjusted)", x = NULL),
+    res_pc_grimage$p2 +
+      labs(title = "PCGrimAge components (blood-cell adjusted)", x = NULL),
+    ress$p2 +
+      labs(title = "SystemsAge components (blood-cell adjusted)", x = NULL),
+    labels = c("a", "b", "c"),
+    label_size = 20,
+    ncol = 1,
+    rel_heights = c(1, 1, 1)
+  )
+)
+dev.off()
+
+# Supplementary Figure 4-1: adjusted main clocks and adjusted-vs-unadjusted effects
+grDevices::cairo_pdf("figures/SFig4-1_main_clocks_blood_adjustment.pdf", width = 10, height = 9)
+print(
+  plot_grid(
+    main_res$p2 +
+      labs(title = "Within-subject effect sizes (blood-cell adjusted)", x = NULL),
+    p_adjusted_vs_unadjusted,
+    labels = c("a", "b"),
+    label_size = 20,
+    ncol = 1,
+    rel_heights = c(1, 1.15)
+  )
+)
+dev.off()
+
+# Supplementary Figure 4-1 switched version: unadjusted main clocks and adjusted-vs-unadjusted effects
+grDevices::cairo_pdf("figures/SFig4-1_main_clocks_no_blood_adjustment.pdf", width = 10, height = 9)
+print(
+  plot_grid(
+    main_res_no_cell$p2 +
+      labs(title = "Within-subject effect sizes", x = NULL),
+    p_adjusted_vs_unadjusted,
+    labels = c("a", "b"),
+    label_size = 20,
+    ncol = 1,
+    rel_heights = c(1, 1.15)
+  )
+)
+dev.off()
+
+# Supplementary Figure 4-2: adjusted PCGrimAge components and adjusted-vs-unadjusted effects
+grDevices::cairo_pdf("figures/SFig4-2_PCGrimAge_blood_adjustment.pdf", width = 10, height = 9)
+print(
+  plot_grid(
+    res_pc_grimage$p2 +
+      labs(title = "PCGrimAge components (blood-cell adjusted)", x = NULL),
+    p_adjusted_vs_unadjusted_pc_grimage,
+    labels = c("a", "b"),
+    label_size = 20,
+    ncol = 1,
+    rel_heights = c(1, 1.15)
+  )
+)
+dev.off()
+
+# Supplementary Figure 4-2 switched version: unadjusted PCGrimAge components and adjusted-vs-unadjusted effects
+grDevices::cairo_pdf("figures/SFig4-2_PCGrimAge_no_blood_adjustment.pdf", width = 10, height = 9)
+print(
+  plot_grid(
+    res_pc_grimage_no_cell$p2 +
+      labs(title = "PCGrimAge components", x = NULL),
+    p_adjusted_vs_unadjusted_pc_grimage,
+    labels = c("a", "b"),
+    label_size = 20,
+    ncol = 1,
+    rel_heights = c(1, 1.15)
+  )
+)
+dev.off()
+
+# Supplementary Figure 4-3: adjusted SystemsAge components and adjusted-vs-unadjusted effects
+grDevices::cairo_pdf("figures/SFig4-3_SystemsAge_blood_adjustment.pdf", width = 10, height = 9)
+print(
+  plot_grid(
+    ress$p2 +
+      labs(title = "SystemsAge components (blood-cell adjusted)", x = NULL),
+    p_adjusted_vs_unadjusted_systemsage,
+    labels = c("a", "b"),
+    label_size = 20,
+    ncol = 1,
+    rel_heights = c(1, 1.15)
+  )
+)
+dev.off()
+
+# Supplementary Figure 4-3 switched version: unadjusted SystemsAge components and adjusted-vs-unadjusted effects
+grDevices::cairo_pdf("figures/SFig4-3_SystemsAge_no_blood_adjustment.pdf", width = 10, height = 9)
+print(
+  plot_grid(
+    ress_no_cell$p2 +
+      labs(title = "SystemsAge components", x = NULL),
+    p_adjusted_vs_unadjusted_systemsage,
+    labels = c("a", "b"),
+    label_size = 20,
+    ncol = 1,
+    rel_heights = c(1, 1.15)
+  )
+)
+dev.off()
+
+# Decomposition plots corresponding to Figure 4 panels a-c
+decomposition_sfig_main_title <- "Decomposition of clock within-subject changes from baseline"
+decomposition_sfig_pc_grimage_title <- "Decomposition of clock within-subject changes from baseline for PCGrimAge components"
+decomposition_sfig_systemsage_title <- "Decomposition of clock within-subject changes from baseline for SystemsAge components"
+
+grDevices::cairo_pdf("figures/SFig4-4_panel_a_main_clocks_decomposition.pdf", width = 10, height = 5.5)
+print(p_decomposition_raincloud + labs(title = decomposition_sfig_main_title))
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-5_panel_b_PCGrimAge_decomposition.pdf", width = 10, height = 5.5)
+print(decomp_pc_grimage_outputs$raincloud + labs(title = decomposition_sfig_pc_grimage_title))
+dev.off()
+
+grDevices::cairo_pdf("figures/SFig4-6_panel_c_SystemsAge_decomposition.pdf", width = 11, height = 5.5)
+print(decomp_systemsage_outputs$raincloud + labs(title = decomposition_sfig_systemsage_title))
+dev.off()
+
+grDevices::cairo_pdf("figures/p_lymphocyte_delta.pdf", width = 6, height = 4)
+print(p_lymphocyte_delta)
 dev.off()
 ```
 
