@@ -21,13 +21,26 @@ format:
     theme: sandstone
     embed-resources: true
     toc: true
+    toc-depth: 3
+    code-fold: false
+    code-tools: true
+    df-print: paged
 editor_options: 
   chunk_output_type: console
 ---
 
 ```{r setup}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
-                      class.output="bg-light")
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 5,
+  dpi = 150,
+  out.width = "100%",
+  class.output = "bg-light"
+)
 ```
 
 ```{r, results=FALSE, message=FALSE, warning=FALSE}
@@ -45,12 +58,58 @@ library(minfi)
 library(DMRcate)
 library(missMethyl)
 library(ggpubr)
+library(ggrepel)
 library(knitr)
 library(gridExtra)
 library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
 library(enrichplot)
 source("utils.R")
-theme_set(theme_minimal())
+theme_set(theme_minimal(base_size = 12))
+```
+
+```{r output-helpers}
+render_table <- function(x, caption = NULL, digits = 3) {
+  if (is.null(x) || nrow(x) == 0) {
+    return(knitr::kable(
+      data.frame(message = "No rows to display."),
+      caption = caption,
+      format = "html"
+    ))
+  }
+
+  knitr::kable(x, digits = digits, caption = caption, format = "html")
+}
+
+plot_top_cpg_panels <- function(result, pheno, pheno_name, n = 6) {
+  cpgs <- rownames(result)[seq_len(min(n, nrow(result)))]
+  plot_df <- as.data.frame(betass[cpgs, meta$Sample, drop = FALSE]) %>%
+    tibble::rownames_to_column("CpG") %>%
+    pivot_longer(-CpG, names_to = "Sample", values_to = "beta") %>%
+    mutate(
+      Sample = sub("^X", "", Sample),
+      pheno = pheno[match(Sample, meta$Sample)]
+    )
+
+  ggplot(plot_df, aes(x = pheno, y = beta)) +
+    geom_point(aes(color = pheno), alpha = 0.85, show.legend = FALSE) +
+    facet_wrap(~CpG, scales = "free_y") +
+    labs(x = pheno_name, y = "Beta values")
+}
+
+format_decide_tests <- function(fit, caption = NULL) {
+  summary(decideTests(fit, adjust.method = "fdr")) %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("direction") %>%
+    render_table(caption = caption)
+}
+
+format_top_table <- function(x, n = 10, caption = NULL) {
+  x %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("CpG") %>%
+    head(n) %>%
+    render_table(caption = caption)
+}
 ```
 
 ```{r, results=FALSE, message=FALSE, warning=FALSE}
@@ -116,14 +175,13 @@ meta <- meta %>%
 meta$Date_Scan_recode <- factor(as.numeric(factor(meta$Date_Scan)))
 meta$sex <- factor(meta$sex)
 
-# Sanity check for covaraites
-stopifnot(all(c("NEUTROPHILE","LYMPHOZYTEN") %in% colnames(meta)))
+# Sanity check for covariates
+stopifnot("LYMPHOZYTEN" %in% colnames(meta))
 meta <- meta %>%
   mutate(
-    NEUTROPHILE = as.numeric(NEUTROPHILE),
     LYMPHOZYTEN = as.numeric(LYMPHOZYTEN)
   )
-stopifnot(!anyNA(meta$NEUTROPHILE), !anyNA(meta$LYMPHOZYTEN))
+stopifnot(!anyNA(meta$LYMPHOZYTEN))
 ```
 
 ::: {.panel-tabset}
@@ -143,7 +201,10 @@ saveRDS(corfit, file="./data/corfit_design1_rm10.RDS")
 
 ```{r}
 corfit <- readRDS(file="./data/corfit_design1_rm10.RDS")
-corfit$consensus
+render_table(
+  data.frame(consensus_correlation = corfit$consensus),
+  caption = "Estimated consensus correlation between repeated participant measurements"
+)
 ```
 
 ```{r}
@@ -170,7 +231,7 @@ results_age <- topTable(fit2, coef = "age", number = Inf)
 results_sex <- topTable(fit2, coef = "Female_vs_Male", number = Inf)
 
 # look at the numbers of DM CpGs at FDR < 0.05
-kable(summary(decideTests(fit2, adjust.method="fdr")))
+format_decide_tests(fit2, caption = "Model 1 DMP counts at FDR < 0.05")
 ```
 
 ```{r}
@@ -180,7 +241,7 @@ saveRDS(fit2, file="./data/fit_model1.RDS")
 #### Check the effect size
 The distribution of log-fold change:
 
-```{r}
+```{r, fig.width=7, fig.height=4}
 hist(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<0.05, "logFC"], 
      breaks=50,
      main = "Histogram of logFC for significant BEFORE vs FUP1 CpGs")
@@ -188,7 +249,7 @@ hist(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<0.05, "logFC"],
 
 Check the overlap between DMPs between pairs of timepoints:
 
-```{r}
+```{r, fig.width=8, fig.height=5}
 dm <- list(BEFORE_vs_FUP1_up = rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<0.05 & results_BEFORE_vs_FUP1$logFC>0,]),
            BEFORE_vs_FUP1_down = rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<0.05 & results_BEFORE_vs_FUP1$logFC<0,]),
      AFTER_vs_FUP1_down = rownames(results_AFTER_vs_FUP1[results_AFTER_vs_FUP1$adj.P.Val<0.05 & results_AFTER_vs_FUP1$logFC<0,]),
@@ -200,28 +261,18 @@ upset(fromList(dm), empty.intersections = TRUE)
 Plotting the top few differentially methylated CpGs:
 
 ##### Age
-```{r}
-sapply(rownames(results_age)[1:6], function(cpg){
-  plotCpg(betass[, meta$Sample], cpg=cpg, pheno=meta$age, ylab = "Beta values")
-})
+```{r, fig.width=9, fig.height=6}
+plot_top_cpg_panels(results_age, meta$age, "Age", n = 6)
 ```
 
 ##### Sex
-```{r}
-sapply(rownames(results_sex)[1:6], function(cpg){
-  plotCpg(betass[,meta$Sample], cpg=cpg, pheno=meta$Gender, ylab = "Beta values")
-})
+```{r, fig.width=9, fig.height=6}
+plot_top_cpg_panels(results_sex, meta$Gender, "Gender", n = 6)
 ```
 
 #### BEFORE vs FUP1
 
-```{r}
-sapply(rownames(results_BEFORE_vs_FUP1)[1:9], function(cpg){
-  plotCpg(betass[,meta$Sample], cpg=cpg, pheno=meta$Timepoint, ylab = "Beta values")
-})
-```
-
-```{r}
+```{r, fig.width=10, fig.height=7}
 tmp <- data.frame(betass[rownames(results_BEFORE_vs_FUP1)[1:9], meta$Sample]) 
 tmp$cpg <- rownames(tmp)
 tmp <- tmp%>% pivot_longer(cols = -cpg, names_to = "Sample", values_to = "beta")
@@ -240,26 +291,26 @@ merge(tmp, meta, by="Sample") %>%
 #### BEFORE_vs_FUP1
 ```{r}
 DMPs <- results_BEFORE_vs_FUP1
-head(DMPs)
+format_top_table(DMPs, n = 10, caption = "Top BEFORE vs FUP1 CpGs from model 1")
 
 # Get the significant CpG sites at less than 5% FDR
 sigCpGs <- rownames(DMPs[DMPs$adj.P.Val<0.05,])
-# First 10 significant CpGs
-sigCpGs[1:10]
-
-# Total number of significant CpGs at 5% FDR
-length(sigCpGs)
 
 # Get all the CpG sites used in the analysis to form the background
 all <- rownames(DMPs)
-# Total number of CpG sites tested
-length(all)
+render_table(
+  data.frame(
+    metric = c("Significant CpGs at FDR < 0.05", "CpGs tested in background"),
+    n = c(length(sigCpGs), length(all))
+  ),
+  caption = "CpG counts used for model 1 GO testing"
+)
 
 # Run enrichment - Can take a bit of time...
 gst <- gometh(sig.cpg=sigCpGs, all.cpg=all)
 
 # Top 10 GO categories
-topGSA(gst, number=30)
+render_table(topGSA(gst, number=30), caption = "Top model 1 GO enrichment results")
 ```
 
 
@@ -274,14 +325,29 @@ myAnnotation <- cpg.annotate(object = M_values, datatype = "array", what = "M",
 DMRs <- dmrcate(myAnnotation, lambda=1000, C=2)
 # convert the regions to annotated genomic ranges
 sigRegions <- extractRanges(DMRs)
-head(sigRegions)
+render_table(
+  as.data.frame(sigRegions) %>% head(10),
+  caption = "Top BEFORE vs FUP1 DMRcate regions"
+)
 ```
 
-```{r}
-hist(sigRegions[sigRegions$no.cpgs >=5,]$maxdiff, 
-     main="Histogram of BEFORE vs FUP1 DMR maxdiff",
-     breaks = 50)
-sigRegions[sigRegions$no.cpgs >=5 & sigRegions$maxdiff > 0.1,]
+```{r, fig.width=7, fig.height=4}
+dmr_regions <- sigRegions[sigRegions$no.cpgs >= 5, ]
+dmr_maxdiff <- as.numeric(dmr_regions$maxdiff)
+dmr_maxdiff <- dmr_maxdiff[is.finite(dmr_maxdiff)]
+
+if (length(dmr_maxdiff) > 0) {
+  hist(dmr_maxdiff, 
+       main = "Histogram of BEFORE vs FUP1 DMR maxdiff",
+       breaks = 50)
+} else {
+  message("No BEFORE vs FUP1 DMRs with at least 5 CpGs; skipping maxdiff histogram.")
+}
+
+render_table(
+  as.data.frame(dmr_regions[as.numeric(dmr_regions$maxdiff) > 0.1, ]),
+  caption = "BEFORE vs FUP1 DMRs with maxdiff > 0.1"
+)
 ```
 
 * PEX11B: Peroxisomal Biogenesis Factor 11 Beta
@@ -304,13 +370,13 @@ Model: Timepoint + Date_Scan + age + sex + ? + (1 | ID_Patient)
 ### Collect the candidate covariates
 Collect the candidate covariates
 * BMI_baseline_category/BMI_baseline
-* blood cell composition: "NEUTROPHILE", "LYMPHOZYTEN"
+* blood cell composition: "LYMPHOZYTEN"
 
 ### Check the covariates + timepoint
 ```{r}
 # covariate sets
 candidate_covariates <- list(
-  "NEUTROPHILE + LYMPHOZYTEN",
+  "LYMPHOZYTEN",
   "BMI_baseline_category",
   "BMI_baseline"
 )
@@ -327,6 +393,8 @@ safe_name <- function(x) gsub("[^A-Za-z0-9_]+", "_", x)
 # Ensure factor coding is as expected (important for sex and timepoint column names)
 # meta$Timepoint <- factor(meta$Timepoint, levels = c("BEFORE","AFTER","FUP1"))
 # meta$sex <- relevel(factor(meta$sex), ref = "0")  # depends on your encoding
+
+model2_decide_summaries <- list()
 
 for (model_name in names(models)) {
 
@@ -384,7 +452,7 @@ for (model_name in names(models)) {
     res_sex <- NULL  # or stop() if you want strictness
   }
 
-  # covariate(s) – could be 1 term or multiple (NEUTROPHILE + LYMPHOZYTEN)
+  # covariate(s) - could be 1 term or multiple
   cov_terms <- all.vars(as.formula(paste("~", model_name)))
   cov_coefs <- cov_terms[cov_terms %in% colnames(design)]
   # If BMI_baseline_category expands to multiple dummy columns, capture them:
@@ -395,8 +463,10 @@ for (model_name in names(models)) {
   names(res_cov) <- cov_coefs
 
   # --- summaries ---
-  print(knitr::kable(summary(decideTests(fit2, adjust.method = "fdr"))))
-  cat("\n\n<!-- -->\n\n")
+  model2_decide_summaries[[model_name]] <- summary(decideTests(fit2, adjust.method = "fdr")) %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("direction") %>%
+    mutate(model = model_name, .before = direction)
 
   # --- save ---
   saveRDS(
@@ -417,12 +487,17 @@ for (model_name in names(models)) {
     file = file.path("./data", paste0("fit_model2_", safe_name(model_name), ".RDS"))
   )
 }
+
+render_table(
+  bind_rows(model2_decide_summaries),
+  caption = "Model 2 candidate-covariate DMP counts at FDR < 0.05"
+)
 ```
 
 Some observations
 
 - BMI_baseline do have effects on the methylation levels. Since it shouldn’t confound the time effect, it should be added as an interaction term.
-- NEUTROPHILE/LYMPHOZYTEN do have strong effects on the methylation levels, but it is independent of the time effect (from previous correlation analysis), suggesting that it is a strong confounding factor. It should be adjusted for. This can be validated via analyzing the DM CpGs associated to NEUTROPHILE/LYMPHOZYTEN.
+- LYMPHOZYTEN has strong effects on the methylation levels, but it is independent of the time effect (from previous correlation analysis), suggesting that it is a strong confounding factor. It should be adjusted for. This can be validated via analyzing the DM CpGs associated with LYMPHOZYTEN.
 
 ## Model 3
 Model: Timepoint * BMI_baseline + Date_Scan + age + sex + (1 | ID_Patient)
@@ -457,7 +532,7 @@ contrasts <- makeContrasts(
 fit2 <- contrasts.fit(fit, contrasts)
 fit2 <- eBayes(fit2)
 # look at the numbers of DM CpGs at FDR < 0.05
-kable(summary(decideTests(fit2, adjust.method="fdr")))
+format_decide_tests(fit2, caption = "Model 3 interaction DMP counts at FDR < 0.05")
 saveRDS(fit2, file="./data/fit_model3_interaction.RDS")
 ```
 :::
@@ -467,10 +542,10 @@ saveRDS(fit2, file="./data/fit_model3_interaction.RDS")
 ```{r}
 # model 1
 design <- model.matrix(~ 0 + Timepoint + Date_Scan_recode + age + sex, data = meta)
-corfit <- readRDS(file="corfit_design1_rm10.RDS")
+corfit <- readRDS(file="data/corfit_design1_rm10.RDS")
 fit <- lmFit(M_values, design, block=meta$ID_Patient, correlation = corfit$consensus)
 contrasts <- makeContrasts(
-  AFTER_vs_FUP1 = TimepointAFTER - TimepointFUP1,
+  BEFORE_vs_FUP1 = TimepointBEFORE - TimepointFUP1,
   levels = design
 )
 fit2 <- contrasts.fit(fit, contrasts)
@@ -478,7 +553,7 @@ fit2 <- eBayes(fit2)
 
 # Extract results for each contrast
 results_BEFORE_vs_FUP1 <- topTable(fit2, coef = "BEFORE_vs_FUP1", number = Inf)
-summary(decideTests(fit2, adjust.method="fdr"))
+format_decide_tests(fit2, caption = "Model 1 BEFORE vs FUP1 DMP counts")
 ```
 
 ```{r}
@@ -494,14 +569,14 @@ dm <- list(model1_up = rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$ad
 
 ```{r}
 # model 2
-design <- model.matrix(~ 0 + Timepoint + Date_Scan_recode + age + sex + NEUTROPHILE + LYMPHOZYTEN, data = meta)
-corfit_file <- paste0("data/corfit_", "NEUTROPHILE_LYMPHOZYTEN", ".RDS")
+design <- model.matrix(~ 0 + Timepoint + Date_Scan_recode + age + sex + LYMPHOZYTEN, data = meta)
+corfit_file <- paste0("data/corfit_", "LYMPHOZYTEN", ".RDS")
 if (!file.exists(corfit_file)) {
   corfit <- duplicateCorrelation(M_values, design, block = meta$ID_Patient)
   saveRDS(corfit, file = corfit_file)
 }
 corfit <- readRDS(corfit_file)
-fit <- lmFit(M_values, design, block=meta$ID, correlation = corfit$consensus)
+fit <- lmFit(M_values, design, block=meta$ID_Patient, correlation = corfit$consensus)
 contrasts <- makeContrasts(
   BEFORE_vs_AFTER = TimepointBEFORE - TimepointAFTER,
   BEFORE_vs_FUP1 = TimepointBEFORE - TimepointFUP1,
@@ -518,9 +593,8 @@ results_BEFORE_vs_FUP1 <- topTable(fit2, coef = "BEFORE_vs_FUP1", number = Inf)
 results_AFTER_vs_FUP1 <- topTable(fit2, coef = "AFTER_vs_FUP1", number = Inf)
 
 fit_cov <- eBayes(fit)
-results_NEUTROPHILE <- topTable(fit_cov, coef = "NEUTROPHILE", number = Inf)
 results_LYMPHOZYTEN <- topTable(fit_cov, coef = "LYMPHOZYTEN", number = Inf)
-summary(decideTests(fit2, adjust.method="fdr"))
+format_decide_tests(fit2, caption = "Model 2 lymphocyte-adjusted DMP counts")
 ```
 
 Calculate the delta Beta values (effect size) adjusted for covariates:
@@ -585,7 +659,7 @@ results_BEFORE_vs_FUP1 <- results_list$BEFORE_vs_FUP1
 results_AFTER_vs_FUP1 <- results_list$AFTER_vs_FUP1
 
 # # 7. For continuous variables: approximation
-# continuous_vars <- c("NEUTROPHILE", "LYMPHOZYTEN", "age", "Female_vs_Male")
+# continuous_vars <- c("LYMPHOZYTEN", "age", "Female_vs_Male")
 # for (var in continuous_vars) {
 #   res <- get(paste0("results_", var))
 #   
@@ -606,12 +680,12 @@ sigCpGsModel2 <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Va
 
 dm$model2_up <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th & results_BEFORE_vs_FUP1$logFC> lfc_th,])
 dm$model2_down <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th & results_BEFORE_vs_FUP1$logFC< -lfc_th,])
-dm$NEUTROPHILE/LYMPHOZYTEN_up <- rownames(results_NEUTROPHILE/LYMPHOZYTEN[results_NEUTROPHILE/LYMPHOZYTEN$adj.P.Val<p_th & results_NEUTROPHILE/LYMPHOZYTEN$logFC> lfc_th,])
-dm$NEUTROPHILE/LYMPHOZYTEN_down <- rownames(results_NEUTROPHILE/LYMPHOZYTEN[results_NEUTROPHILE/LYMPHOZYTEN$adj.P.Val<p_th & results_NEUTROPHILE/LYMPHOZYTEN$logFC< -lfc_th,])
+dm$LYMPHOZYTEN_up <- rownames(results_LYMPHOZYTEN[results_LYMPHOZYTEN$adj.P.Val < p_th & results_LYMPHOZYTEN$logFC > lfc_th, ])
+dm$LYMPHOZYTEN_down <- rownames(results_LYMPHOZYTEN[results_LYMPHOZYTEN$adj.P.Val < p_th & results_LYMPHOZYTEN$logFC < -lfc_th, ])
 
-upset(fromList(dm[c("model1_up", "model1_down","model2_up", "model2_down")]))
-upset(fromList(dm[c("model1_up", "model2_up", "NEUTROPHILE/LYMPHOZYTEN_up")]))
-upset(fromList(dm[c("model1_down", "model2_down", "NEUTROPHILE/LYMPHOZYTEN_down")]))
+upset(fromList(dm[c("model1_up", "model1_down","model2_up", "model2_down")]), mainbar.y.label = "CpG intersections")
+upset(fromList(dm[c("model1_up", "model2_up", "LYMPHOZYTEN_up")]), mainbar.y.label = "Up CpG intersections")
+upset(fromList(dm[c("model1_down", "model2_down", "LYMPHOZYTEN_down")]), mainbar.y.label = "Down CpG intersections")
 ```
 
 So it is true that almost all DM CpGs in model 2 are also present in model 1.
@@ -629,17 +703,23 @@ sigCpGs <- rownames(results_BEFORE_vs_FUP1[results_BEFORE_vs_FUP1$adj.P.Val<p_th
                                              abs(results_BEFORE_vs_FUP1$logFC)>lfc_th &
                                              abs(results_BEFORE_vs_FUP1$delta_beta) > delta_beta_th,])
 check <- getMappedEntrezIDs(sig.cpg = sigCpGs)
-length(check$sig.eg)
+render_table(
+  data.frame(
+    metric = c("CpGs passing FDR and delta-beta filters", "Mapped Entrez genes"),
+    n = c(length(sigCpGs), length(check$sig.eg))
+  ),
+  caption = "Model 2 GO-testing input size"
+)
 ```
 
 ::: {.panel-tabset}
 ### GO
-```{r, fig.width=5, fig.height=10}
+```{r, fig.width=8, fig.height=9}
 gst <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), 
               collection="GO", array.type = c("EPIC"),
               plot.bias=TRUE, sig.genes = FALSE)
 
-topGSA(gst, n=20)
+render_table(topGSA(gst, n=20), caption = "Top GO enrichment results for model 2")
 
 gst2compareClusterResult <- function(gst, cluster, n_DE_genes, description="Description"){
   gst$Cluster <- cluster
@@ -677,12 +757,12 @@ enrichplot::dotplot(compare_cluster_obj,
 ```
 
 ### KEGG
-```{r, fig.width=5, fig.height=10}
+```{r, fig.width=8, fig.height=9}
 gst.kegg <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), 
                    array.type = c("EPIC"), collection="KEGG",
                    sig.genes = TRUE)
 
-topGSA(gst.kegg, n=20)
+render_table(topGSA(gst.kegg, n=20), caption = "Top KEGG enrichment results for model 2")
 
 compare_cluster_obj <- gst2compareClusterResult(gst.kegg, 
                          cluster="AFTER_vs_FUP1", 
@@ -698,12 +778,12 @@ enrichplot::dotplot(compare_cluster_obj,
 ```
 
 ### KEGG promoter
-```{r}
+```{r, fig.width=8, fig.height=9}
 gst.kegg.prom <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), array.type = c("EPIC"),
                         collection="KEGG", genomic.features = c("TSS200",
                                                                 "TSS1500",
                                                                 "1stExon"))
-topGSA(gst.kegg.prom, n=20)
+render_table(topGSA(gst.kegg.prom, n=20), caption = "Top promoter KEGG enrichment results")
 
 compare_cluster_obj <- gst2compareClusterResult(gst.kegg.prom, 
                          cluster="AFTER_vs_FUP1", 
@@ -722,17 +802,17 @@ enrichplot::dotplot(compare_cluster_obj,
 ```{r}
 gst.kegg.body <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), 
                         collection="KEGG", array.type = c("EPIC"), genomic.features = c("Body"))
-topGSA(gst.kegg.body, n=20)
+render_table(topGSA(gst.kegg.body, n=20), caption = "Top gene-body KEGG enrichment results")
 
 gst.kegg.body <- gometh(sig.cpg=sigCpGs, all.cpg=rownames(results_BEFORE_vs_FUP1), 
                         collection="KEGG", array.type = c("EPIC"), genomic.features = c("Body"), sig.genes = TRUE)
-topGSA(gst.kegg.body, n=10)
+render_table(topGSA(gst.kegg.body, n=10), caption = "Top gene-body KEGG enrichment results with significant genes")
 ```
 
 :::
 
 # Visualization
-
+## M+1 vs D-1
 ```{r}
 res <- results_BEFORE_vs_FUP1
 
@@ -748,7 +828,7 @@ res_annot <- as.data.frame(merge(res, ann_sub, by = "CpG", all.x = TRUE))
 res_sig <- res_annot[res_annot$significance != "Not Sig", ]
 ```
 
-```{r}
+```{r, fig.width=11, fig.height=5}
 # Manhattan plot
 df <- res_annot %>% select(CpG, chr, pos, P.Value, adj.P.Val, delta_beta) 
 
@@ -781,12 +861,18 @@ p_manhattan <- ggplot(df, aes(x=bp_cum, y=-log10(P.Value), color=as.factor(chr))
   geom_point_rast(alpha=0.6, size=0.8) +
   scale_color_manual(values=rep(c("grey30","grey60"), length.out=length(unique(df$chr)))) +
   scale_x_continuous(label=axis_df$chr, breaks=axis_df$center) +
-  labs(x="Chromosome", y="-log10(p)") +
-  theme_classic() +
-  theme(legend.position="none") +
+  labs(title = "M+1 vs D-1 differential methylation across the genome",
+       x="Chromosome", y="-log10(p)") +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position="none",
+    plot.title = element_text(face = "bold", size = 13)
+  ) +
   # geom_hline(yintercept=-log10(0.05), linetype="dashed", color="black") +
-  geom_point(data=subset(df, adj.P.Val < 0.05 & delta_beta > 0.02), color="red", size=0.8) +
-  geom_point(data=subset(df, adj.P.Val < 0.05 & delta_beta < -0.02), color="blue", size=0.8)
+  geom_point(data=subset(df, adj.P.Val < 0.05 & delta_beta > 0.02), color="#B2182B", size=0.8) +
+  geom_point(data=subset(df, adj.P.Val < 0.05 & delta_beta < -0.02), color="#2166AC", size=0.8)
+
+p_manhattan
 
 save(p_manhattan, file="figures/p_manhattan.RData")
 
@@ -795,22 +881,22 @@ plot(p_manhattan)
 dev.off() 
 ```
 
-```{r}
+```{r, fig.width=8, fig.height=6}
 n_hyper <- sum(res$significance == "Hypermethylated", na.rm = TRUE)
 n_hypo <- sum(res$significance == "Hypomethylated", na.rm = TRUE)
 
 # Basic volcano plot
 volcano <- ggplot(res, aes(x = delta_beta, y = logP)) +
   rasterise(geom_point(aes(color = significance), alpha = 0.7), dpi = 300) +
-  scale_color_manual(values = c("Hypermethylated" = "red", 
-                                "Hypomethylated" = "blue", 
-                                "Not Sig" = "grey")) +
+  scale_color_manual(values = c("Hypermethylated" = "#B2182B", 
+                                "Hypomethylated" = "#2166AC", 
+                                "Not Sig" = "grey75")) +
   geom_vline(xintercept = c(-delta_beta_th, delta_beta_th), linetype = "dashed", color = "black") +
   geom_hline(yintercept = -log10(p_th), linetype = "dashed", color = "black") +
-  theme_minimal() +
-  labs(title = "Volcano Plot of Differential Methylation",
-       x = "Beta Value Change",
-       y = "-log10(P-value)",
+  theme_minimal(base_size = 12) +
+  labs(title = "M+1 vs D-1 differential methylation",
+       x = "Beta value change",
+       y = "-log10(FDR)",
        color = "Significance")
 
 p1 <- volcano +
@@ -826,9 +912,10 @@ top_hits$Gene_Symbol <- sapply(strsplit(top_hits$UCSC_RefGene_Name, ";"), `[`, 1
 p1 <- p1 + geom_text_repel(data = top_hits, aes(x = delta_beta, y = logP, label = Gene_Symbol), 
                            size = 2,
                            inherit.aes = FALSE)
+p1
 ```
 
-```{r}
+```{r, fig.width=7, fig.height=4.5}
 plot_df <- as.data.frame(table(res_sig$significance, res_sig$Relation_to_Island))
 colnames(plot_df) <- c("Direction", "Region", "Count")
 plot_df$Region <- factor(plot_df$Region, 
@@ -852,7 +939,7 @@ ggplot(aes(x = Direction, y = Count, fill =Region)) +
 p3
 ```
 
-```{r}
+```{r, fig.width=7, fig.height=4.5}
 # Assume res_sig has a column UCSC_RefGene_Group with semicolon-separated entries
 res_long <- res_sig %>%
   separate_rows(UCSC_RefGene_Group, sep = ";") %>%
@@ -897,11 +984,74 @@ ggplot(aes(x = significance, y = Count, fill = UCSC_RefGene_Group)) +
 p4
 ```
 
-```{r}
+```{r, fig.width=12, fig.height=6}
 p5 <- plot_grid(p3, p4, labels=c("b","c"), label_size=20, ncol=1, rel_heights = c(1, 1))
 p0 <- plot_grid(p1, p5, labels=c("a",""), label_size=20, ncol=2, rel_widths = c(1.45, 1))
 
+p0
+
+save(p0, p1, p3, p4, p5, res, res_annot, res_sig, file = "figures/Fig3_plot_objects.RData")
+
 grDevices::cairo_pdf("figures/Fig3.pdf", width=13, height=6)
 print(p0)
+dev.off()
+```
+
+## D+10 vs D-1
+
+Use the same visualization workflow as Figure 3 for the `D+10 - D-1` contrast
+from model 2. The model contrast is stored as `BEFORE_vs_AFTER`, while
+`delta_beta` is calculated as `AFTER - BEFORE`, so the x-axis represents the
+adjusted beta-value change from D-1 to D+10. No CpGs pass the combined FDR and
+delta-beta threshold for this contrast, so only a volcano plot is generated as
+an exploratory overview.
+
+```{r}
+res <- results_BEFORE_vs_AFTER
+
+ann <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+res$CpG <- rownames(res)
+res$logP <- -log10(res$adj.P.Val)
+ann_sub <- ann[rownames(ann) %in% res$CpG, ]
+ann_sub$CpG <- rownames(ann_sub)
+res$significance <- "Not Sig"
+res$significance[res$adj.P.Val < p_th & res$logFC > lfc_th & res$delta_beta < -delta_beta_th] <- "Hypermethylated"
+res$significance[res$adj.P.Val < p_th & res$logFC < -lfc_th & res$delta_beta > delta_beta_th] <- "Hypomethylated"
+res_annot <- as.data.frame(merge(res, ann_sub, by = "CpG", all.x = TRUE))
+res_sig <- res_annot[res_annot$significance != "Not Sig", ]
+```
+
+```{r, fig.width=8, fig.height=6}
+n_hyper <- sum(res$significance == "Hypermethylated", na.rm = TRUE)
+n_hypo <- sum(res$significance == "Hypomethylated", na.rm = TRUE)
+
+volcano <- ggplot(res, aes(x = delta_beta, y = logP)) +
+  rasterise(geom_point(aes(color = significance), alpha = 0.7), dpi = 300) +
+  scale_color_manual(values = c("Hypermethylated" = "#B2182B", 
+                                "Hypomethylated" = "#2166AC", 
+                                "Not Sig" = "grey75")) +
+  geom_vline(xintercept = c(-delta_beta_th, delta_beta_th), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = -log10(p_th), linetype = "dashed", color = "black") +
+  theme_minimal(base_size = 12) +
+  labs(title = "D+10 vs D-1 Differential Methylation",
+       x = "Beta value change",
+       y = "-log10(FDR)",
+       color = "Significance")
+
+p1_d10 <- volcano +
+  annotate("text", 
+           x = max(res$delta_beta, na.rm = TRUE) * 0.35, 
+           y = max(res$logP, na.rm = TRUE) * 0.85, 
+           label = paste0("Hypermethylated: ", n_hyper, "\nHypomethylated: ", n_hypo),
+           hjust = 0, size = 4, fontface = "italic")
+
+p1_d10
+
+save(p1_d10, res, res_annot, res_sig, file = "figures/volcano_D10_vs_D1_plot_objects.RData")
+```
+
+```{r}
+grDevices::cairo_pdf("figures/volcano_D10_vs_D1.pdf", width = 6, height = 5)
+print(p1_d10)
 dev.off()
 ```
