@@ -268,7 +268,7 @@ main_parameters <- c(bp_vars, energy_vars, liver_vars, blood_vars, kidney_vars, 
 vital_parameters <- c("BMI", "weight", "sbp", "dbp", "pulse")
 
 custom_labels <- c(
-  Ketosemia = "Blood ketone (mmol/L)",
+  Ketosemia = "Capillary blood ketone (mmol/L)",
   # Homa = "HOMA-IR",
   # glykohemoglobin = "Glycohemoglobin (mmol/mol)",
   triglyceride = "Triglycerides (mg/dL)",
@@ -289,7 +289,7 @@ custom_labels <- c(
   # LYMPHOZYTEN = "Lymphocytes (xE9/L)",
   # ptt = "PTT (s)",
   # quick = "Quick",
-  glucose = "Glucose (mg/dL)",
+  glucose = "Venous glucose (mg/dL)",
   uric_acid = "Uric acid (mg/dL)",
   leukocytes = "White blood cell count (Tsd./µL)",
   crp_hs = "C-reactive protein (hsCRP) (mg/L)"

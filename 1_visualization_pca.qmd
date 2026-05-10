@@ -482,8 +482,9 @@ load("figures/p_blood_params_selected.RData")
 
 ```{r}
 p_up <- plot_grid(p_weight_trend, pf1, pf2, labels=c("a", "b", "c"), label_size=20, ncol=3, rel_widths=c(1.5,1,1.3), align="h", axis="tb")
+p_fig2 <- plot_grid(p_up, p_selected_box, labels=c("", "d"), label_size=20, ncol=1, rel_heights=c(1,1.2), align="v", axis="tb")
 
 grDevices::cairo_pdf("figures/Fig2.pdf", width=12, height=8)
-plot_grid(p_up, p_selected_box, labels=c("", "d"), label_size=20, ncol=1, rel_heights=c(1,1.2), align="v", axis="tb")
+print(p_fig2)
 dev.off()
 ```

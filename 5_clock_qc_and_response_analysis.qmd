@@ -2,16 +2,21 @@
 title: "Clock QC and age-acceleration screening"
 subtitle: "Clock-vs-age plots and RAA associations with maximum weight loss"
 abstract: |
-  This notebook provides per-clock visualization and exploratory association
-  plots for the merged epigenetic clock table. It joins
-  `data/AllClocks_Merged.csv` with three-timepoint metadata, calculates residual
-  age acceleration (RAA) for selected clocks, and generates clock-specific plots
-  of predicted epigenetic age versus chronological age using mixed models with
-  participant random intercepts. It then tests and visualizes associations
-  between each RAA measure and maximum weight-loss percentage using linear mixed
-  models adjusted for sex, timepoint, lymphocyte proportion, baseline BMI where
-  specified, and participant ID. Outputs include combined PDFs for clock-vs-age
-  plots, all RAA-weight-loss plots, and a selected RAA subset.
+  This notebook performs quality-control visualization and exploratory
+  weight-loss association screening for epigenetic clock residual age
+  acceleration (RAA). It joins `data/AllClocks_Merged.csv` with three-timepoint
+  metadata, estimates RAA for 12 clocks, and checks each clock against
+  chronological age using mixed models with participant random intercepts.
+  Repeated-measures models then test associations between RAA and maximum
+  weight-loss percentage after adjustment for sex, timepoint, lymphocyte
+  proportion, and baseline BMI. Greater maximum weight loss is nominally
+  associated with lower Horvath 1, Horvath 2, and PhenoAge RAA, with the
+  strongest and most stable evidence for Horvath 2 and PhenoAge after baseline
+  BMI adjustment. Baseline-only sensitivity analyses show the same negative
+  pattern for Horvath 2 and PhenoAge, while weight-loss-by-baseline-BMI
+  interactions are not clearly supported. Outputs include clock-vs-age plots,
+  repeated-measures and baseline sensitivity tables, interaction tests, and
+  RAA-weight-loss plot PDFs.
 format:
   html:
     theme: sandstone
