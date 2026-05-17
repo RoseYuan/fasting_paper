@@ -255,6 +255,130 @@ format_time_effects <- function(effects, model_label) {
     )
 }
 
+fit_time_by_sex_models <- function(data_wide,
+                                   clock_cols,
+                                   sex_var = "Gender",
+                                   cell_covariate = "LYMPHOZYTEN",
+                                   time_var = "Timepoint",
+                                   id_var = "ID",
+                                   baseline_label = "D-1",
+                                   ci_level = 0.95,
+                                   REML = TRUE,
+                                   adjust = "none") {
+  clock_cols_RAA_z_base <- paste0(clock_cols, "_RAA_z_base")
+
+  fits <- map(clock_cols_RAA_z_base, function(var_name) {
+    need_vars <- c(var_name, time_var, sex_var, cell_covariate, id_var)
+    dat <- data_wide %>%
+      select(all_of(need_vars)) %>%
+      drop_na()
+
+    if (nrow(dat) < 5) {
+      warning(sprintf("Variable '%s': not enough complete rows. Skipping.", var_name))
+      return(NULL)
+    }
+
+    dat[[time_var]] <- relevel(factor(dat[[time_var]]), ref = baseline_label)
+    dat[[sex_var]] <- factor(dat[[sex_var]])
+
+    form_txt <- sprintf(
+      "%s ~ %s * %s + %s + (1 | %s)",
+      var_name,
+      time_var,
+      sex_var,
+      cell_covariate,
+      id_var
+    )
+    fit <- lmer(as.formula(form_txt), data = dat, REML = REML)
+
+    emm <- emmeans(fit, as.formula(paste("~", time_var, "|", sex_var)))
+    time_contrasts <- contrast(
+      emm,
+      method = "trt.vs.ctrl",
+      ref = baseline_label,
+      adjust = adjust
+    )
+
+    sex_summary <- time_contrasts %>%
+      summary(infer = TRUE, level = ci_level) %>%
+      as_tibble()
+
+    if (!"df" %in% colnames(sex_summary)) {
+      sex_summary$df <- NA_real_
+    }
+
+    sex_contrasts <- sex_summary %>%
+      transmute(
+        variable = var_name,
+        sex = .data[[sex_var]],
+        contrast,
+        estimate = estimate,
+        lower = lower.CL,
+        upper = upper.CL,
+        SE = SE,
+        df = df,
+        t = t.ratio,
+        p = p.value
+      )
+
+    interaction_summary <- contrast(
+      time_contrasts,
+      method = "pairwise",
+      by = "contrast",
+      adjust = adjust
+    ) %>%
+      summary(infer = TRUE, level = ci_level) %>%
+      as_tibble()
+
+    if (!"df" %in% colnames(interaction_summary)) {
+      interaction_summary$df <- NA_real_
+    }
+
+    interaction_terms <- interaction_summary %>%
+      transmute(
+        variable = var_name,
+        time_contrast = contrast,
+        sex_difference = contrast1,
+        estimate = estimate,
+        lower = lower.CL,
+        upper = upper.CL,
+        SE = SE,
+        df = df,
+        t = t.ratio,
+        p = p.value
+      )
+
+    list(sex_contrasts = sex_contrasts, interaction_terms = interaction_terms)
+  }) %>%
+    compact()
+
+  list(
+    sex_contrasts = bind_rows(map(fits, "sex_contrasts")),
+    interaction_terms = bind_rows(map(fits, "interaction_terms"))
+  )
+}
+
+format_time_by_sex_effects <- function(effects, model_label) {
+  effects %>%
+    mutate(
+      clock = str_remove(variable, "_RAA_z_base$"),
+      timepoint = str_match(contrast, "\\(([^)]+)\\)")[, 2],
+      model = model_label
+    ) %>%
+    transmute(
+      model,
+      clock,
+      sex,
+      timepoint,
+      effect_size = estimate,
+      lower_95 = lower,
+      upper_95 = upper,
+      SE,
+      df,
+      p_value = p
+    )
+}
+
 extract_blood_cell_effects <- function(data_wide,
                                        clock_cols,
                                        cell_covariates = c("NEUTROPHILE", "LYMPHOZYTEN"),
@@ -441,6 +565,78 @@ render_table(
 render_table(
   blood_cell_effect_sizes,
   caption = "Standardized blood-cell proportion effect sizes in the adjusted models"
+)
+```
+
+## Timepoint-by-Sex Interaction Model
+
+This sensitivity model keeps the same SRAA outcome scale, lymphocyte adjustment,
+and participant random intercept as the main blood-cell-adjusted model, but
+allows the timepoint effect to differ by sex:
+`clock_RAA_z_base ~ Timepoint * Gender + LYMPHOZYTEN + (1 | ID)`.
+
+The first table reports sex-specific mixed-model contrasts for D+10 and M+1
+versus D-1. The second table reports contrast-of-contrasts tests, which test
+whether each timepoint contrast differs between the sex groups.
+
+```{r timepoint-sex-interaction-model, results='asis'}
+time_by_sex_res <- fit_time_by_sex_models(
+  data_wide,
+  clock_cols,
+  sex_var = "Gender",
+  cell_covariate = "LYMPHOZYTEN",
+  time_var = "Timepoint",
+  id_var = "ID",
+  baseline_label = "D-1"
+)
+
+time_by_sex_effect_sizes <- format_time_by_sex_effects(
+  time_by_sex_res$sex_contrasts,
+  "Timepoint x sex + lymphocyte adjustment"
+) %>%
+  arrange(clock, sex, timepoint) %>%
+  mutate(
+    p_value = signif(p_value, 3),
+    across(c(effect_size, lower_95, upper_95, SE, df), ~ round(.x, 3))
+  )
+
+time_by_sex_interaction_terms <- time_by_sex_res$interaction_terms %>%
+  mutate(
+    clock = str_remove(variable, "_RAA_z_base$"),
+    p_value = signif(p, 3),
+    across(c(estimate, lower, upper, SE, df, t), ~ round(.x, 3))
+  ) %>%
+  select(
+    clock,
+    time_contrast,
+    sex_difference,
+    estimate,
+    lower_95 = lower,
+    upper_95 = upper,
+    SE,
+    df,
+    t,
+    p_value
+  )
+
+render_table(
+  time_by_sex_effect_sizes,
+  caption = "Sex-specific timepoint effect sizes from Timepoint x Gender models"
+)
+
+render_table(
+  time_by_sex_interaction_terms,
+  caption = "Timepoint-by-sex contrast-of-contrasts tests"
+)
+
+write_csv(
+  time_by_sex_effect_sizes,
+  "figures/timepoint_by_sex_effect_sizes.csv"
+)
+
+write_csv(
+  time_by_sex_interaction_terms,
+  "figures/timepoint_by_sex_interaction_terms.csv"
 )
 ```
 
@@ -1539,14 +1735,14 @@ df_assoc <- scores_all %>%
 
 
 ```{r}
-test_pc_assoc <- function(df, pc_col, vars, panel_name, min_n = 5) {
+test_spearman_assoc <- function(df, x_col, vars, panel_name, min_n = 5) {
 
   res <- lapply(vars, function(v) {
 
     # variable exists?
     if (!v %in% colnames(df)) return(NULL)
 
-    x <- df[[pc_col]]
+    x <- df[[x_col]]
     y <- df[[v]]
 
     # paired non-missing
@@ -1579,6 +1775,10 @@ test_pc_assoc <- function(df, pc_col, vars, panel_name, min_n = 5) {
   if (is.null(res) || nrow(res) == 0) return(NULL)
 
   res %>% mutate(p_adj = p.adjust(p_value, method = "BH"))
+}
+
+test_pc_assoc <- function(df, pc_col, vars, panel_name, min_n = 5) {
+  test_spearman_assoc(df, pc_col, vars, panel_name, min_n = min_n)
 }
 
 run_assoc_for_timepoint <- function(df_assoc, timepoint_value, pc_col) {
@@ -2436,6 +2636,312 @@ print(p_lymphocyte_delta)
 dev.off()
 ```
 
+## Clock and Component Clinical Associations
+
+```{r clock-component-clinical-associations, results='asis'}
+run_feature_clinical_assoc <- function(data_wide,
+                                       feature_cols,
+                                       feature_set,
+                                       feature_type,
+                                       prefix_patterns = NULL,
+                                       timepoints = c("D+10", "M+1")) {
+  feature_delta_cols <- paste0(feature_cols, "_RAA_z_base_delta")
+  feature_delta_cols <- feature_delta_cols[feature_delta_cols %in% colnames(data_wide)]
+
+  if (length(feature_delta_cols) == 0) {
+    return(tibble())
+  }
+
+  label_tbl <- tibble(
+    feature_col = feature_delta_cols,
+    feature = str_remove(feature_delta_cols, "_RAA_z_base_delta$")
+  )
+
+  if (!is.null(prefix_patterns)) {
+    for (pattern in prefix_patterns) {
+      label_tbl$feature <- str_remove(label_tbl$feature, paste0("^", pattern))
+    }
+  }
+
+  df_feature_assoc <- data_wide %>%
+    select(ID, Timepoint, all_of(feature_delta_cols)) %>%
+    mutate(
+      ID = as.integer(ID),
+      Timepoint = as.character(Timepoint)
+    ) %>%
+    filter(Timepoint %in% timepoints) %>%
+    left_join(clinical_df, by = c("ID", "Timepoint"))
+
+  bind_rows(lapply(timepoints, function(timepoint_value) {
+    df_tp <- df_feature_assoc %>% filter(Timepoint == timepoint_value)
+
+    bind_rows(lapply(feature_delta_cols, function(feature_col) {
+      bind_rows(
+        test_spearman_assoc(df_tp, feature_col, vars_metabolic, "Metabolic"),
+        test_spearman_assoc(df_tp, feature_col, vars_stress, "Stress"),
+        test_spearman_assoc(df_tp, feature_col, vars_hematology, "Hematology"),
+        test_spearman_assoc(df_tp, feature_col, vars_subject, "Symptoms")
+      ) %>%
+        mutate(
+          Timepoint = timepoint_value,
+          feature_col = feature_col
+        )
+    }))
+  })) %>%
+    left_join(label_tbl, by = "feature_col") %>%
+    mutate(
+      feature_set = feature_set,
+      feature_type = feature_type
+    ) %>%
+    relocate(feature_set, feature_type, feature, feature_col, Timepoint, panel, variable)
+}
+
+clock_component_assoc_results <- bind_rows(
+  run_feature_clinical_assoc(
+    main_res$data_wide,
+    clock_cols,
+    feature_set = "Main clocks",
+    feature_type = "Clock"
+  ),
+  run_feature_clinical_assoc(
+    res_pc_grimage$data_wide,
+    pc_grimage_cols,
+    feature_set = "PCGrimAge",
+    feature_type = "Clock component"
+  ),
+  run_feature_clinical_assoc(
+    res1$data_wide,
+    grimage1_cols,
+    feature_set = "GrimAge",
+    feature_type = "Clock component",
+    prefix_patterns = "GrimAge"
+  ),
+  run_feature_clinical_assoc(
+    res2$data_wide,
+    grimage2_cols,
+    feature_set = "GrimAge v2",
+    feature_type = "Clock component",
+    prefix_patterns = "GrimAge2"
+  ),
+  run_feature_clinical_assoc(
+    ress$data_wide,
+    systemsage_cols,
+    feature_set = "SystemsAge",
+    feature_type = "Clock component"
+  )
+) %>%
+  mutate(p_adj_all_tests = p.adjust(p_value, method = "BH"))
+
+render_table(
+  clock_component_assoc_results %>%
+    filter(p_adj_all_tests < 0.05) %>%
+    mutate(
+      across(c(rho, p_value, p_adj, p_adj_all_tests), ~ signif(.x, 3))
+    ) %>%
+    arrange(p_adj_all_tests, p_value),
+  caption = "Clock and clock-component clinical associations passing global BH-adjusted p < 0.05"
+)
+```
+
+## Clock and Component Change-Change Clinical Associations
+
+```{r clock-component-clinical-change-associations, results='asis'}
+clinical_assoc_vars <- unique(c(
+  vars_metabolic,
+  vars_stress,
+  vars_hematology,
+  vars_subject
+))
+
+make_clinical_delta_df <- function(clinical_df,
+                                   vars,
+                                   timepoints = c("D+10", "M+1"),
+                                   baseline_label = "D-1") {
+  vars_present <- vars[vars %in% colnames(clinical_df)]
+
+  baseline_df <- clinical_df %>%
+    mutate(
+      ID = as.integer(ID),
+      Timepoint = as.character(Timepoint)
+    ) %>%
+    filter(Timepoint == baseline_label) %>%
+    select(ID, all_of(vars_present)) %>%
+    rename_with(~ paste0(.x, "_baseline"), all_of(vars_present))
+
+  delta_df <- clinical_df %>%
+    mutate(
+      ID = as.integer(ID),
+      Timepoint = as.character(Timepoint)
+    ) %>%
+    filter(Timepoint %in% timepoints) %>%
+    select(ID, Timepoint, all_of(vars_present)) %>%
+    left_join(baseline_df, by = "ID")
+
+  for (v in vars_present) {
+    baseline_col <- paste0(v, "_baseline")
+    delta_col <- paste0(v, "_delta_from_", str_replace_all(baseline_label, "[^A-Za-z0-9]+", ""))
+    delta_df[[delta_col]] <- suppressWarnings(as.numeric(delta_df[[v]])) -
+      suppressWarnings(as.numeric(delta_df[[baseline_col]]))
+  }
+
+  delta_df
+}
+
+clinical_delta_df <- make_clinical_delta_df(clinical_df, clinical_assoc_vars)
+
+clinical_delta_var_map <- tibble(
+  variable = clinical_assoc_vars
+) %>%
+  filter(variable %in% colnames(clinical_df)) %>%
+  mutate(
+    delta_variable = paste0(variable, "_delta_from_D1")
+  )
+
+test_spearman_delta_assoc <- function(df, x_col, vars, panel_name, min_n = 5) {
+  delta_vars <- clinical_delta_var_map %>%
+    filter(variable %in% vars, delta_variable %in% colnames(df))
+
+  res <- lapply(seq_len(nrow(delta_vars)), function(i) {
+    v <- delta_vars$variable[i]
+    delta_v <- delta_vars$delta_variable[i]
+
+    x <- suppressWarnings(as.numeric(df[[x_col]]))
+    y <- suppressWarnings(as.numeric(df[[delta_v]]))
+    ok <- is.finite(x) & is.finite(y)
+
+    if (sum(ok) < min_n) return(NULL)
+    if (sd(x[ok]) == 0 || sd(y[ok]) == 0) return(NULL)
+
+    ct <- tryCatch(
+      cor.test(x[ok], y[ok], method = "spearman", exact = FALSE),
+      error = function(e) NULL
+    )
+
+    if (is.null(ct)) return(NULL)
+
+    data.frame(
+      panel = panel_name,
+      variable = v,
+      delta_variable = delta_v,
+      n = sum(ok),
+      rho = unname(ct$estimate),
+      p_value = ct$p.value
+    )
+  }) %>% bind_rows()
+
+  if (is.null(res) || nrow(res) == 0) return(NULL)
+
+  res %>% mutate(p_adj = p.adjust(p_value, method = "BH"))
+}
+
+run_feature_clinical_delta_assoc <- function(data_wide,
+                                             feature_cols,
+                                             feature_set,
+                                             feature_type,
+                                             prefix_patterns = NULL,
+                                             timepoints = c("D+10", "M+1")) {
+  feature_delta_cols <- paste0(feature_cols, "_RAA_z_base_delta")
+  feature_delta_cols <- feature_delta_cols[feature_delta_cols %in% colnames(data_wide)]
+
+  if (length(feature_delta_cols) == 0) {
+    return(tibble())
+  }
+
+  label_tbl <- tibble(
+    feature_col = feature_delta_cols,
+    feature = str_remove(feature_delta_cols, "_RAA_z_base_delta$")
+  )
+
+  if (!is.null(prefix_patterns)) {
+    for (pattern in prefix_patterns) {
+      label_tbl$feature <- str_remove(label_tbl$feature, paste0("^", pattern))
+    }
+  }
+
+  df_feature_delta_assoc <- data_wide %>%
+    select(ID, Timepoint, all_of(feature_delta_cols)) %>%
+    mutate(
+      ID = as.integer(ID),
+      Timepoint = as.character(Timepoint)
+    ) %>%
+    filter(Timepoint %in% timepoints) %>%
+    left_join(clinical_delta_df, by = c("ID", "Timepoint"))
+
+  bind_rows(lapply(timepoints, function(timepoint_value) {
+    df_tp <- df_feature_delta_assoc %>% filter(Timepoint == timepoint_value)
+
+    bind_rows(lapply(feature_delta_cols, function(feature_col) {
+      bind_rows(
+        test_spearman_delta_assoc(df_tp, feature_col, vars_metabolic, "Metabolic"),
+        test_spearman_delta_assoc(df_tp, feature_col, vars_stress, "Stress"),
+        test_spearman_delta_assoc(df_tp, feature_col, vars_hematology, "Hematology"),
+        test_spearman_delta_assoc(df_tp, feature_col, vars_subject, "Symptoms")
+      ) %>%
+        mutate(
+          Timepoint = timepoint_value,
+          feature_col = feature_col
+        )
+    }))
+  })) %>%
+    left_join(label_tbl, by = "feature_col") %>%
+    mutate(
+      feature_set = feature_set,
+      feature_type = feature_type,
+      clinical_change = paste0(Timepoint, " - D-1")
+    ) %>%
+    relocate(
+      feature_set, feature_type, feature, feature_col,
+      Timepoint, clinical_change, panel, variable, delta_variable
+    )
+}
+
+clock_component_clinical_delta_assoc_results <- bind_rows(
+  run_feature_clinical_delta_assoc(
+    main_res$data_wide,
+    clock_cols,
+    feature_set = "Main clocks",
+    feature_type = "Clock"
+  ),
+  run_feature_clinical_delta_assoc(
+    res_pc_grimage$data_wide,
+    pc_grimage_cols,
+    feature_set = "PCGrimAge",
+    feature_type = "Clock component"
+  ),
+  run_feature_clinical_delta_assoc(
+    res1$data_wide,
+    grimage1_cols,
+    feature_set = "GrimAge",
+    feature_type = "Clock component",
+    prefix_patterns = "GrimAge"
+  ),
+  run_feature_clinical_delta_assoc(
+    res2$data_wide,
+    grimage2_cols,
+    feature_set = "GrimAge v2",
+    feature_type = "Clock component",
+    prefix_patterns = "GrimAge2"
+  ),
+  run_feature_clinical_delta_assoc(
+    ress$data_wide,
+    systemsage_cols,
+    feature_set = "SystemsAge",
+    feature_type = "Clock component"
+  )
+) %>%
+  mutate(p_adj_all_tests = p.adjust(p_value, method = "BH"))
+
+render_table(
+  clock_component_clinical_delta_assoc_results %>%
+    filter(p_adj_all_tests < 0.05) %>%
+    mutate(
+      across(c(rho, p_value, p_adj, p_adj_all_tests), ~ signif(.x, 3))
+    ) %>%
+    arrange(p_adj_all_tests, p_value),
+  caption = "Clock and clock-component change-change clinical associations passing global BH-adjusted p < 0.05"
+)
+```
+
 # Save Results
 
 ```{r save-all-results}
@@ -2475,7 +2981,9 @@ plots <- list(
   p_adjusted_vs_unadjusted_SystemsAge = p_adjusted_vs_unadjusted_systemsage,
   systemsage_component_decomposition_effects = systemsage_component_decomposition_effects,
   decomp_SystemsAge = decomp_systemsage_outputs,
-  assoc_results = assoc_results
+  assoc_results = assoc_results,
+  clock_component_assoc_results = clock_component_assoc_results,
+  clock_component_clinical_delta_assoc_results = clock_component_clinical_delta_assoc_results
 )
 saveRDS(plots, file = "figures/epiAge_plots.rds")
 
@@ -2491,6 +2999,36 @@ write.table(
 write_xlsx(
   assoc_results,
   "figures/epiAge_PC_association_results.xlsx",
+  col_names = TRUE,
+  format_headers = TRUE
+)
+
+write.table(
+  clock_component_assoc_results,
+  file = "figures/clock_component_clinical_association_results.csv",
+  sep = ",",
+  row.names = FALSE,
+  quote = FALSE
+)
+
+write_xlsx(
+  clock_component_assoc_results,
+  "figures/clock_component_clinical_association_results.xlsx",
+  col_names = TRUE,
+  format_headers = TRUE
+)
+
+write.table(
+  clock_component_clinical_delta_assoc_results,
+  file = "figures/clock_component_clinical_delta_association_results.csv",
+  sep = ",",
+  row.names = FALSE,
+  quote = FALSE
+)
+
+write_xlsx(
+  clock_component_clinical_delta_assoc_results,
+  "figures/clock_component_clinical_delta_association_results.xlsx",
   col_names = TRUE,
   format_headers = TRUE
 )
