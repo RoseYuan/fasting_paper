@@ -2636,6 +2636,211 @@ print(p_lymphocyte_delta)
 dev.off()
 ```
 
+```{r export-figure-4-plot-data}
+make_fig4_label_map <- function(clock_cols, prefix_patterns = NULL) {
+  display_labels <- clock_cols
+
+  if (!is.null(prefix_patterns)) {
+    for (pattern in prefix_patterns) {
+      display_labels <- gsub(paste0("^", pattern), "", display_labels)
+    }
+  }
+
+  stats_cols <- paste0(clock_cols, "_RAA_z_base")
+  names(display_labels) <- stats_cols
+  display_labels
+}
+
+make_fig4_delta_plot_data <- function(res,
+                                      clock_cols,
+                                      panel,
+                                      feature_set,
+                                      prefix_patterns = NULL) {
+  delta_cols <- paste0(clock_cols, "_RAA_z_base_delta")
+  label_map <- make_fig4_label_map(clock_cols, prefix_patterns)
+
+  res$data_wide %>%
+    select(ID, Timepoint, all_of(delta_cols)) %>%
+    pivot_longer(
+      cols = all_of(delta_cols),
+      names_to = "clock_delta_col",
+      values_to = "delta_sraa"
+    ) %>%
+    mutate(
+      panel = panel,
+      feature_set = feature_set,
+      Timepoint = as.character(Timepoint),
+      clock_model_col = sub("_delta$", "", clock_delta_col),
+      clock = str_remove(clock_model_col, "_RAA_z_base$"),
+      display_label = unname(label_map[clock_model_col])
+    ) %>%
+    filter(Timepoint != "D-1") %>%
+    select(
+      panel,
+      feature_set,
+      ID,
+      Timepoint,
+      clock,
+      display_label,
+      clock_model_col,
+      clock_delta_col,
+      delta_sraa
+    ) %>%
+    arrange(Timepoint, clock_model_col, ID)
+}
+
+make_fig4_effect_data <- function(res,
+                                  clock_cols,
+                                  panel,
+                                  feature_set,
+                                  prefix_patterns = NULL) {
+  label_map <- make_fig4_label_map(clock_cols, prefix_patterns)
+
+  prep_traj_summary(
+    res$effects,
+    baseline_label = "D-1",
+    var_label = "clock",
+    keep_contrast = TRUE
+  ) %>%
+    mutate(
+      panel = panel,
+      feature_set = feature_set,
+      display_label = unname(label_map[clock])
+    ) %>%
+    rename(
+      Timepoint = Time,
+      effect_size = estimate,
+      lower_95 = lower_err,
+      upper_95 = upper_err,
+      p_value = p
+    ) %>%
+    select(
+      panel,
+      feature_set,
+      Timepoint,
+      clock,
+      display_label,
+      effect_size,
+      lower_95,
+      upper_95,
+      SE,
+      df,
+      p_value,
+      stars,
+      contrast
+    ) %>%
+    arrange(clock, Timepoint)
+}
+
+make_fig4_annotation_data <- function(plot_data, effect_data, y_margin = 0.15) {
+  plot_data %>%
+    group_by(panel, feature_set, Timepoint, clock_model_col, display_label) %>%
+    summarise(y_top = max(delta_sraa, na.rm = TRUE), .groups = "drop") %>%
+    inner_join(
+      effect_data %>%
+        filter(Timepoint != "D-1", !is.na(stars), stars != "", stars != "ns") %>%
+        select(panel, feature_set, Timepoint, clock, stars, p_value),
+      by = c(
+        "panel",
+        "feature_set",
+        "Timepoint",
+        "clock_model_col" = "clock"
+      )
+    ) %>%
+    mutate(
+      clock = clock_model_col,
+      y = y_top + y_margin
+    ) %>%
+    select(
+      panel,
+      feature_set,
+      Timepoint,
+      clock,
+      display_label,
+      stars,
+      p_value,
+      y_top,
+      y
+    ) %>%
+    arrange(panel, Timepoint, display_label)
+}
+
+fig4a_plot_data <- make_fig4_delta_plot_data(
+  main_res_no_cell,
+  clock_cols,
+  panel = "a",
+  feature_set = "Main clocks"
+)
+
+fig4b_plot_data <- make_fig4_delta_plot_data(
+  res_pc_grimage_no_cell,
+  pc_grimage_cols,
+  panel = "b",
+  feature_set = "PCGrimAge components"
+)
+
+fig4c_plot_data <- make_fig4_delta_plot_data(
+  ress_no_cell,
+  systemsage_cols,
+  panel = "c",
+  feature_set = "SystemsAge components"
+)
+
+fig4a_effect_data <- make_fig4_effect_data(
+  main_res_no_cell,
+  clock_cols,
+  panel = "a",
+  feature_set = "Main clocks"
+)
+
+fig4b_effect_data <- make_fig4_effect_data(
+  res_pc_grimage_no_cell,
+  pc_grimage_cols,
+  panel = "b",
+  feature_set = "PCGrimAge components"
+)
+
+fig4c_effect_data <- make_fig4_effect_data(
+  ress_no_cell,
+  systemsage_cols,
+  panel = "c",
+  feature_set = "SystemsAge components"
+)
+
+fig4_plot_data <- bind_rows(fig4a_plot_data, fig4b_plot_data, fig4c_plot_data)
+fig4_effect_data <- bind_rows(fig4a_effect_data, fig4b_effect_data, fig4c_effect_data)
+fig4_annotation_data <- make_fig4_annotation_data(fig4_plot_data, fig4_effect_data)
+
+write_xlsx(
+  list(
+    Fig4_readme = tibble(
+      sheet = c(
+        "Fig4a_plot_data",
+        "Fig4b_plot_data",
+        "Fig4c_plot_data",
+        "Fig4_effects",
+        "Fig4_star_positions"
+      ),
+      contents = c(
+        "Non-baseline delta-SRAA values used for Figure 4a raincloud plot.",
+        "Non-baseline delta-SRAA values used for Figure 4b raincloud plot.",
+        "Non-baseline delta-SRAA values used for Figure 4c raincloud plot.",
+        "Mixed-model contrasts versus D-1 used for Figure 4 significance stars.",
+        "Y positions for non-ns significance stars displayed in Figure 4."
+      )
+    ),
+    Fig4a_plot_data = fig4a_plot_data,
+    Fig4b_plot_data = fig4b_plot_data,
+    Fig4c_plot_data = fig4c_plot_data,
+    Fig4_effects = fig4_effect_data,
+    Fig4_star_positions = fig4_annotation_data
+  ),
+  "figures/Fig4_panel_a_c_plot_data.xlsx",
+  col_names = TRUE,
+  format_headers = TRUE
+)
+```
+
 ## Clock and Component Clinical Associations
 
 ```{r clock-component-clinical-associations, results='asis'}
